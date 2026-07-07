@@ -1,0 +1,5017 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<title>세린캠 관리자</title>
+<link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css" />
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<!-- 고객용 홈페이지와 동일한 키 설정 파일을 같은 폴더에 두세요 -->
+<script src="./serincam-config.js"></script>
+<style>
+  :root{
+    --bg:#eef1f6; --card:#ffffff; --ink:#171a21; --muted:#7a8494; --sub:#5c6472; --sub2:#3d4453;
+    --line:#f1f3f7; --primary:#1f6bff; --primary-soft:#e7efff;
+    --green:#12b76a; --green-soft:#e3f7ee;
+    --orange:#f79009; --orange-soft:#fdf0dc;
+    --red:#f04438; --red-soft:#fde4e2;
+    --gray-soft:#e3e7ef;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--bg);font-family:'Pretendard',-apple-system,BlinkMacSystemFont,sans-serif;-webkit-font-smoothing:antialiased;color:var(--ink);}
+  #root{max-width:480px;margin:0 auto;min-height:100vh;background:var(--bg);position:relative;}
+  button{font-family:inherit;border:none;background:none;cursor:pointer;-webkit-tap-highlight-color:transparent;}
+  input,textarea,select{font-family:inherit;}
+  .tap{cursor:pointer;-webkit-tap-highlight-color:transparent;}
+  .tap:active{opacity:.7;}
+  .scr::-webkit-scrollbar{display:none;}
+  .card{background:var(--card);border-radius:20px;box-shadow:0 1px 3px rgba(20,25,40,.06);}
+  .row-btn{display:flex;align-items:center;gap:12px;padding:13px 16px;}
+  .divider{height:1px;background:var(--line);margin:0 16px;}
+  .badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;}
+  .pill{font-size:12px;font-weight:700;padding:7px 14px;border-radius:20px;white-space:nowrap;}
+  .spin{animation:spin 0.8s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  @keyframes slideUp{from{transform:translateY(24px);opacity:0;}to{transform:translateY(0);opacity:1;}}
+  .sheet{animation:slideUp .22s ease-out;}
+  @keyframes fadeIn{from{opacity:0;}to{opacity:1;}}
+  .fadein{animation:fadeIn .15s ease-out;}
+  #boot-error{display:none;position:fixed;inset:0;background:#fff;z-index:99999;padding:24px;font-family:-apple-system,sans-serif;color:#b91c1c;font-size:13px;line-height:1.6;white-space:pre-wrap;overflow:auto;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="boot-error"></div>
+<script>
+  // 화면이 하얗게 나올 때 원인을 바로 보여주기 위한 전역 오류 캐처
+  window.addEventListener('error', function (e) {
+    var box = document.getElementById('boot-error');
+    if (!box) return;
+    box.style.display = 'block';
+    box.textContent += '[오류] ' + (e.message || e.type) + (e.filename ? ('\n  at ' + e.filename.split('/').pop() + ':' + e.lineno) : '') + '\n\n';
+  });
+</script>
+<script>const {
+  useState,
+  useEffect,
+  useMemo,
+  useRef
+} = React;
+
+/* ---------- Supabase 연결 ---------- */
+const CFG = window.SERINCAM_CONFIG || {};
+const SUPABASE_URL = CFG.SUPABASE_URL || "";
+const SUPABASE_ANON_KEY = CFG.SUPABASE_ANON_KEY || "";
+const ADMIN_PASSWORD = CFG.ADMIN_PASSWORD || null; // serincam-config.js 에 추가해서 사용
+
+let sb = null;
+if (SUPABASE_URL && SUPABASE_ANON_KEY) {
+  sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+}
+
+/* ---------- 공통 유틸 ---------- */
+const STATUS_LIST = ["예약신청", "대기", "확정", "반납", "취소"];
+const STATUS_STYLE = {
+  "예약신청": {
+    c: "#f79009",
+    bg: "#fdf0dc"
+  },
+  "대기": {
+    c: "#1f6bff",
+    bg: "#e7efff"
+  },
+  "확정": {
+    c: "#12b76a",
+    bg: "#e3f7ee"
+  },
+  "반납": {
+    c: "#7a5cff",
+    bg: "#eee8ff"
+  },
+  "취소": {
+    c: "#f04438",
+    bg: "#fde4e2"
+  }
+};
+function statusStyle(s) {
+  return STATUS_STYLE[s] || STATUS_STYLE["대기"];
+}
+function normalizeStatus(s) {
+  if (STATUS_LIST.includes(s)) return s;
+  if ((s || "").includes("반납")) return "반납"; // 다른 시스템의 "반납완료" 등도 반납으로 인식
+  return "대기";
+} // 그 외 예전/알 수 없는 값은 대기로 표시
+function displayStatus(s) {
+  return normalizeStatus(s);
+}
+
+// "2026. 7. 10" / "2026-7-10" / "2026/7/10" 등 여러 표기를 Date로 변환
+function parseDotDate(str) {
+  if (!str || typeof str !== "string") return null;
+  const m = str.match(/(\d{4})[.\-\/]\s*(\d{1,2})[.\-\/]\s*(\d{1,2})/);
+  if (!m) return null;
+  return new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]));
+}
+function sameDay(a, b) {
+  return a && b && a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+function fmtMoney(n) {
+  const num = Number(n) || 0;
+  return "₩" + num.toLocaleString("ko-KR");
+}
+function fmtMonthDay(d) {
+  return `${d.getMonth() + 1}월 ${d.getDate()}일`;
+}
+// "2026. 7. 4." -> "7/4(토)"
+function fmtShortDateDot(str) {
+  const d = parseDotDate(str);
+  if (!d) return str || "-";
+  return `${d.getMonth() + 1}/${d.getDate()}(${WEEKDAYS[d.getDay()]})`;
+}
+async function copyText(text, showToast) {
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast && showToast("복사했어요");
+  } catch (e) {
+    showToast && showToast("복사에 실패했어요");
+  }
+}
+// orderTime "2026. 7. 4. 오후 3:20:00" -> Date (정렬용, 실패시 매우 과거 날짜)
+function parseOrderTime(str) {
+  if (!str || typeof str !== "string") return new Date(0);
+  const m = str.match(/(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.\s*(오전|오후)\s*(\d{1,2}):(\d{2})/);
+  if (!m) return new Date(0);
+  let h = parseInt(m[5]);
+  if (m[4] === "오후" && h < 12) h += 12;
+  if (m[4] === "오전" && h === 12) h = 0;
+  return new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]), h, parseInt(m[6]));
+}
+// orderTime -> "7/4 오후 3:20" 짧은 표기
+// orderTime -> "7월 4일 오후 3:20" 표기
+function fmtOrderShort(str) {
+  if (!str || typeof str !== "string") return "-";
+  const m = str.match(/(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.\s*(오전|오후)\s*(\d{1,2}):(\d{2})/);
+  if (!m) return str;
+  return `${parseInt(m[2])}월 ${parseInt(m[3])}일 ${m[4]} ${m[5]}:${m[6]}`;
+}
+function sortByRecency(list) {
+  return [...list].sort((a, b) => parseOrderTime(b.orderTime) - parseOrderTime(a.orderTime));
+}
+// 오늘부터 7일간의 날짜 배열
+function getWeekDays() {
+  const today = new Date();
+  return Array.from({
+    length: 7
+  }, (_, i) => new Date(today.getFullYear(), today.getMonth(), today.getDate() + i));
+}
+// 이번주 예약(픽업)/반납 이벤트를 항상 최신 reservations 기준으로 계산
+// - 예약(픽업): 대여시작일 기준, 모델에 기기번호가 이미 배정된 건은 제외
+// - 반납: 반납일 기준, 상태가 "반납"으로 처리된 건은 제외
+function computeScheduleEvents(reservations) {
+  const weekDays = getWeekDays();
+  const pickupEvents = [];
+  const returnEvents = [];
+  reservations.forEach(r => {
+    if (!isModelNumberAssigned(r.model)) {
+      const start = parseDotDate(r.startDate);
+      if (weekDays.some(d => sameDay(start, d))) pickupEvents.push({
+        ...r,
+        kind: "픽업",
+        methodDate: r.startDate
+      });
+    }
+    // 관리자 페이지의 '반납' 버튼뿐 아니라, 다른 곳에서 "반납완료" 등으로 기록해도 인식되도록
+    // 상태값에 "반납"이라는 글자가 포함되어 있으면 처리 완료로 보고 제외해요.
+    if (!(r.status || "").includes("반납")) {
+      const end = parseDotDate(r.endDate);
+      if (weekDays.some(d => sameDay(end, d))) returnEvents.push({
+        ...r,
+        kind: "반납",
+        methodDate: r.endDate
+      });
+    }
+  });
+  return {
+    weekDays,
+    pickupEvents,
+    returnEvents
+  };
+}
+// scheduleList 기술자({type, method, day})를 받아 최신 reservations 기준으로 이벤트 목록을 계산
+function resolveScheduleEvents(reservations, desc) {
+  if (!desc) return [];
+  const {
+    pickupEvents,
+    returnEvents
+  } = computeScheduleEvents(reservations);
+  let base = desc.type === "pickup" ? pickupEvents : returnEvents;
+  const methodField = desc.type === "pickup" ? "delivery" : "returnMethod";
+  if (desc.method) base = base.filter(e => (e[methodField] || "미선택") === desc.method);
+  if (desc.day) base = base.filter(e => sameDay(parseDotDate(e.methodDate), desc.day));
+  return base;
+}
+const WEEKDAYS = ["일", "월", "화", "수", "목", "금", "토"];
+
+/* ---------- 로딩/에러 뱃지 ---------- */
+function Spinner({
+  size = 22,
+  color = "var(--primary)"
+}) {
+  return /*#__PURE__*/React.createElement("svg", {
+    className: "spin",
+    width: size,
+    height: size,
+    viewBox: "0 0 24 24",
+    fill: "none"
+  }, /*#__PURE__*/React.createElement("circle", {
+    cx: "12",
+    cy: "12",
+    r: "9",
+    stroke: color,
+    strokeWidth: "2.5",
+    strokeLinecap: "round",
+    strokeDasharray: "40 100"
+  }));
+}
+
+/* ---------- 아이콘 (outline, 참고 UI와 동일 스타일) ---------- */
+const Icon = {
+  home: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.9",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M4 11l8-6 8 6"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M6 10v9h12v-9"
+  })),
+  book: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.9",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("rect", {
+    x: "4",
+    y: "5",
+    width: "16",
+    height: "15",
+    rx: "2.5"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M4 9.5h16"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M8 3v4"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M16 3v4"
+  })),
+  calendar: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.9",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("rect", {
+    x: "4",
+    y: "5",
+    width: "16",
+    height: "15",
+    rx: "2.5"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M4 10h16"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M9 3v4"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M15 3v4"
+  })),
+  star: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.8",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M12 3l2.5 5.5L20 9l-4 4 1 6-5-3-5 3 1-6-4-4 5.5-.5z"
+  })),
+  settings: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.8",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M4 8h16"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M4 16h16"
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: "10",
+    cy: "8",
+    r: "2.4",
+    fill: "#fff"
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: "15",
+    cy: "16",
+    r: "2.4",
+    fill: "#fff"
+  })),
+  back: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "2",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M15 6l-6 6 6 6"
+  })),
+  search: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.9",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("circle", {
+    cx: "11",
+    cy: "11",
+    r: "7"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M21 21l-4.3-4.3"
+  })),
+  phone: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.9",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M5 4h4l2 5-3 2a12 12 0 005 5l2-3 5 2v4a2 2 0 01-2 2A16 16 0 013 6a2 2 0 012-2"
+  })),
+  truck: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.8",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("rect", {
+    x: "2",
+    y: "7",
+    width: "13",
+    height: "9",
+    rx: "1.5"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M15 10h3l3 3v3h-6z"
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: "6.5",
+    cy: "18",
+    r: "1.6"
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: "16.5",
+    cy: "18",
+    r: "1.6"
+  })),
+  box: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.8",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M21 8l-9-5-9 5 9 5 9-5z"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M3 8v9l9 5 9-5V8"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M12 13v9"
+  })),
+  won: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.8",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M12 2v20"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M17 6H9.5a3 3 0 000 6H14a3 3 0 010 6H6"
+  })),
+  trash: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.8",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M4 7h16"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M6 7l1 13a2 2 0 002 2h6a2 2 0 002-2l1-13"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M9 7V4h6v3"
+  })),
+  chevRight: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "2",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M9 6l6 6-6 6"
+  })),
+  chevLeft: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "2",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M15 6l-6 6 6 6"
+  })),
+  plus: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "2.2",
+    strokeLinecap: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M12 5v14"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M5 12h14"
+  })),
+  close: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "2",
+    strokeLinecap: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M6 6l12 12"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M18 6L6 18"
+  })),
+  battery: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.8",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("rect", {
+    x: "2",
+    y: "8",
+    width: "17",
+    height: "8",
+    rx: "2"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M22 10v4"
+  })),
+  refresh: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.9",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M4 4v6h6"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M20 20v-6h-6"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M5 15a8 8 0 0013.9 3M19 9A8 8 0 005.1 6"
+  })),
+  ticket: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.8",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M3 9a2 2 0 002-2h14a2 2 0 002 2v1a2 2 0 000 4v1a2 2 0 00-2 2H5a2 2 0 00-2-2v-1a2 2 0 000-4z"
+  })),
+  copy: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.8",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("rect", {
+    x: "9",
+    y: "9",
+    width: "12",
+    height: "12",
+    rx: "2"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M5 15V5a2 2 0 012-2h10"
+  })),
+  zap: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.8",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M13 2L4 14h6l-1 8 9-12h-6l1-8z"
+  })),
+  chart: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.9",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M5 20V11"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M12 20V5"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M19 20v-6"
+  })),
+  download: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.9",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M12 3v12"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M7 10l5 5 5-5"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M4 21h16"
+  })),
+  user: p => /*#__PURE__*/React.createElement("svg", {
+    ...p,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.9",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("circle", {
+    cx: "12",
+    cy: "8",
+    r: "3.5"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M5 20c1.5-4 5-6 7-6s5.5 2 7 6"
+  }))
+};
+
+/* ---------- 하단 탭바 ---------- */
+const TABS = [{
+  key: "home",
+  label: "홈",
+  icon: Icon.home
+}, {
+  key: "book",
+  label: "예약",
+  icon: Icon.book
+}, {
+  key: "sales",
+  label: "매출",
+  icon: Icon.chart
+}, {
+  key: "review",
+  label: "리뷰",
+  icon: Icon.star
+}, {
+  key: "settings",
+  label: "설정",
+  icon: Icon.settings
+}];
+function TabBar({
+  active,
+  onChange
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: "0 0 auto",
+      height: 62,
+      background: "#fff",
+      borderTop: "1px solid #eceef2",
+      display: "flex",
+      padding: "6px 4px 10px",
+      position: "sticky",
+      bottom: 0,
+      zIndex: 30
+    }
+  }, TABS.map(t => {
+    const on = active === t.key;
+    return /*#__PURE__*/React.createElement("div", {
+      key: t.key,
+      className: "tap",
+      onClick: () => onChange(t.key),
+      style: {
+        flex: 1,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 3,
+        color: on ? "var(--primary)" : "#9aa1ad"
+      }
+    }, /*#__PURE__*/React.createElement(t.icon, {
+      width: 21,
+      height: 21,
+      strokeWidth: on ? 2 : 1.8
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 10,
+        fontWeight: on ? 700 : 600
+      }
+    }, t.label));
+  }));
+}
+
+/* ---------- 상단바: 좌측 로고(홈 이동) ---------- */
+function TopBar({
+  onLogo
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 44,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      padding: "0 16px",
+      flex: "0 0 auto"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: onLogo,
+    style: {
+      width: 30,
+      height: 30,
+      borderRadius: 9,
+      background: "var(--primary)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      boxShadow: "0 6px 12px -4px rgba(31,107,255,.5)"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#fff",
+      fontWeight: 800,
+      fontSize: 13
+    }
+  }, "S")), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      fontWeight: 600,
+      color: "var(--muted)"
+    }
+  }, "세린캠 관리자"));
+}
+
+/* ---------- 헤더 ---------- */
+function PageHeader({
+  title,
+  right,
+  onBack
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      padding: "2px 16px 6px",
+      flex: "0 0 auto"
+    }
+  }, onBack ? /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: onBack,
+    style: {
+      width: 38,
+      height: 38,
+      background: "#fff",
+      borderRadius: 11,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      boxShadow: "0 1px 3px rgba(20,25,40,.08)"
+    }
+  }, /*#__PURE__*/React.createElement(Icon.back, {
+    width: 19,
+    height: 19
+  })) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 21,
+      fontWeight: 800,
+      letterSpacing: "-.02em"
+    }
+  }, title), onBack && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800
+    }
+  }, title), /*#__PURE__*/React.createElement("div", null, right || /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: onBack ? 38 : 0
+    }
+  })));
+}
+
+/* ---------- 토스트 ---------- */
+function Toast({
+  msg
+}) {
+  if (!msg) return null;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fadein",
+    style: {
+      position: "fixed",
+      bottom: 84,
+      left: "50%",
+      transform: "translateX(-50%)",
+      background: "rgba(23,26,33,.92)",
+      color: "#fff",
+      fontSize: 13,
+      fontWeight: 600,
+      padding: "10px 18px",
+      borderRadius: 14,
+      zIndex: 999,
+      maxWidth: "80%",
+      textAlign: "center"
+    }
+  }, msg);
+}
+
+/* =====================================================================
+   로그인 게이트
+===================================================================== */
+function LoginGate({
+  onSuccess
+}) {
+  const [pw, setPw] = useState("");
+  const [err, setErr] = useState("");
+  const submit = () => {
+    if (!ADMIN_PASSWORD) {
+      onSuccess();
+      return;
+    }
+    if (pw === ADMIN_PASSWORD) {
+      localStorage.setItem("serincam_admin_auth", "1");
+      onSuccess();
+    } else {
+      setErr("비밀번호가 올바르지 않아요.");
+    }
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      minHeight: "100vh",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 24,
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 64,
+      height: 64,
+      borderRadius: 20,
+      background: "var(--primary)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      boxShadow: "0 12px 22px -8px rgba(31,107,255,.5)"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#fff",
+      fontWeight: 800,
+      fontSize: 24
+    }
+  }, "S")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 18,
+      fontWeight: 800
+    }
+  }, "세린캠 관리자"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: "100%",
+      maxWidth: 280
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "password",
+    value: pw,
+    placeholder: "관리자 비밀번호",
+    onChange: e => {
+      setPw(e.target.value);
+      setErr("");
+    },
+    onKeyDown: e => e.key === "Enter" && submit(),
+    style: {
+      width: "100%",
+      height: 50,
+      borderRadius: 14,
+      border: "1.5px solid #e6e9f0",
+      padding: "0 16px",
+      fontSize: 15,
+      outline: "none",
+      background: "#fff"
+    }
+  }), err && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: "var(--red)",
+      fontSize: 12,
+      marginTop: 8,
+      fontWeight: 600
+    }
+  }, err), /*#__PURE__*/React.createElement("button", {
+    onClick: submit,
+    style: {
+      width: "100%",
+      height: 50,
+      borderRadius: 14,
+      background: "var(--primary)",
+      color: "#fff",
+      fontWeight: 800,
+      fontSize: 15,
+      marginTop: 12,
+      boxShadow: "0 12px 20px -8px rgba(31,107,255,.6)"
+    }
+  }, "입장하기")), !SUPABASE_URL && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "var(--red)",
+      textAlign: "center",
+      marginTop: 10,
+      maxWidth: 260
+    }
+  }, "serincam-config.js 를 찾지 못했어요. 이 파일과 같은 폴더에 있는지 확인해주세요."));
+}
+
+/* =====================================================================
+   메인 앱
+===================================================================== */
+function App() {
+  const [authed, setAuthed] = useState(() => !ADMIN_PASSWORD || localStorage.getItem("serincam_admin_auth") === "1");
+  const [tab, setTab] = useState("home");
+  const [reservations, setReservations] = useState([]);
+  const [reviews, setReviews] = useState([]);
+  const [settings, setSettings] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [toast, setToast] = useState("");
+  const [detailId, setDetailId] = useState(null); // 예약 상세 오버레이 (id로 관리 → 변경사항 즉시 반영)
+  const [modelAssignRow, setModelAssignRow] = useState(null); // 대여모델 배정 시트
+  const [scheduleList, setScheduleList] = useState(null); // { title, events } 일정 리스트 시트
+  const [pullY, setPullY] = useState(0); // 당겨서 새로고침
+  const [refreshing, setRefreshing] = useState(false);
+  const pullStartY = useRef(null);
+  const scrollRef = useRef(null);
+  const onTouchStart = e => {
+    if (scrollRef.current && scrollRef.current.scrollTop <= 0) {
+      pullStartY.current = e.touches[0].clientY;
+    } else {
+      pullStartY.current = null;
+    }
+  };
+  const onTouchMove = e => {
+    if (pullStartY.current == null || refreshing) return;
+    const delta = e.touches[0].clientY - pullStartY.current;
+    if (delta > 0 && scrollRef.current && scrollRef.current.scrollTop <= 0) {
+      setPullY(Math.min(delta * 0.5, 90));
+    }
+  };
+  const onTouchEnd = async () => {
+    if (pullY > 55 && !refreshing) {
+      setRefreshing(true);
+      setPullY(55);
+      await loadAll();
+      setRefreshing(false);
+    }
+    setPullY(0);
+    pullStartY.current = null;
+  };
+  const showToast = m => {
+    setToast(m);
+    setTimeout(() => setToast(""), 2200);
+  };
+  async function fetchAllRows(table) {
+    const pageSize = 1000;
+    let from = 0;
+    let all = [];
+    while (true) {
+      const {
+        data,
+        error
+      } = await sb.from(table).select("*").order("id", {
+        ascending: false
+      }).range(from, from + pageSize - 1);
+      if (error) throw error;
+      all = all.concat(data || []);
+      if (!data || data.length < pageSize) break;
+      from += pageSize;
+    }
+    return all;
+  }
+  async function loadAll() {
+    if (!sb) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const [resData, revData, {
+        data: setData,
+        error: e3
+      }] = await Promise.all([fetchAllRows("reservations"), fetchAllRows("reviews"), sb.from("admin_settings").select("*")]);
+      setReservations(resData || []);
+      setReviews(revData || []);
+      if (!e3 && setData) {
+        const map = {};
+        setData.forEach(row => {
+          map[row.key] = row.value;
+        });
+        setSettings(map);
+      }
+    } catch (err) {
+      console.error(err);
+      showToast("데이터를 불러오지 못했어요: " + (err.message || ""));
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => {
+    if (authed) loadAll();
+  }, [authed]);
+  async function updateReservation(id, patch) {
+    if (!sb) return;
+    try {
+      const {
+        error
+      } = await sb.from("reservations").update(patch).eq("id", id);
+      if (error) throw error;
+      setReservations(prev => prev.map(r => r.id === id ? {
+        ...r,
+        ...patch
+      } : r));
+      showToast("변경 완료");
+    } catch (err) {
+      showToast("변경 실패: " + (err.message || ""));
+    }
+  }
+  async function bulkUpdateStatus(ids, status) {
+    if (!sb || ids.length === 0) return;
+    try {
+      const {
+        error
+      } = await sb.from("reservations").update({
+        status
+      }).in("id", ids);
+      if (error) throw error;
+      setReservations(prev => prev.map(r => ids.includes(r.id) ? {
+        ...r,
+        status
+      } : r));
+      showToast(`${ids.length}건 상태를 "${status}"로 변경했어요`);
+    } catch (err) {
+      showToast("일괄 변경 실패: " + (err.message || ""));
+    }
+  }
+  async function deleteReservation(id) {
+    if (!sb) return;
+    try {
+      const {
+        error
+      } = await sb.from("reservations").delete().eq("id", id);
+      if (error) throw error;
+      setReservations(prev => prev.filter(r => r.id !== id));
+      showToast("삭제했어요");
+      setDetailId(null);
+    } catch (err) {
+      showToast("삭제 실패: " + (err.message || ""));
+    }
+  }
+  async function deleteReview(id) {
+    if (!sb) return;
+    try {
+      const {
+        error
+      } = await sb.from("reviews").delete().eq("id", id);
+      if (error) throw error;
+      setReviews(prev => prev.filter(r => r.id !== id));
+      showToast("리뷰를 삭제했어요");
+    } catch (err) {
+      showToast("삭제 실패: " + (err.message || ""));
+    }
+  }
+  async function saveSetting(key, value) {
+    if (!sb) return;
+    try {
+      const {
+        error
+      } = await sb.from("admin_settings").upsert({
+        key,
+        value,
+        updated_at: new Date().toISOString()
+      });
+      if (error) throw error;
+      setSettings(prev => ({
+        ...prev,
+        [key]: value
+      }));
+      showToast("설정을 저장했어요");
+    } catch (err) {
+      showToast("저장 실패: " + (err.message || "") + " (admin_settings 테이블이 있는지 확인해주세요)");
+    }
+  }
+  if (!authed) return /*#__PURE__*/React.createElement(LoginGate, {
+    onSuccess: () => setAuthed(true)
+  });
+  if (!sb) {
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        padding: 40,
+        textAlign: "center",
+        color: "var(--red)",
+        fontWeight: 700
+      }
+    }, "serincam-config.js 를 찾지 못했어요.", /*#__PURE__*/React.createElement("br", null), "이 파일과 같은 폴더에 있는지 확인해주세요.");
+  }
+  const goHome = () => {
+    setDetailId(null);
+    setTab("home");
+  };
+  const setDetailRes = r => setDetailId(r ? r.id : null); // 호출 방식은 기존과 동일 (row 전달)
+  const detailRow = reservations.find(r => r.id === detailId) || null;
+  const ctx = {
+    reservations,
+    reviews,
+    settings,
+    showToast,
+    loadAll,
+    updateReservation,
+    bulkUpdateStatus,
+    deleteReservation,
+    deleteReview,
+    saveSetting,
+    setDetailRes,
+    goHome,
+    modelAssignRow,
+    setModelAssignRow,
+    scheduleList,
+    setScheduleList
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      minHeight: "100vh"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "scr",
+    ref: scrollRef,
+    onTouchStart: onTouchStart,
+    onTouchMove: onTouchMove,
+    onTouchEnd: onTouchEnd,
+    style: {
+      flex: 1,
+      overflowY: "auto",
+      display: "flex",
+      flexDirection: "column",
+      position: "relative",
+      transform: pullY ? `translateY(${pullY}px)` : "none",
+      transition: pullY ? "none" : "transform .2s"
+    }
+  }, (pullY > 0 || refreshing) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "absolute",
+      top: 0,
+      left: 0,
+      right: 0,
+      display: "flex",
+      justifyContent: "center",
+      paddingTop: 10,
+      transform: `translateY(${-Math.min(pullY, 55)}px)`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 30,
+      height: 30,
+      borderRadius: "50%",
+      background: "#fff",
+      boxShadow: "0 2px 8px rgba(20,25,40,.15)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
+    }
+  }, /*#__PURE__*/React.createElement(Icon.refresh, {
+    width: 16,
+    height: 16,
+    color: "var(--primary)",
+    style: {
+      transform: refreshing ? "none" : `rotate(${pullY * 3}deg)`,
+      animation: refreshing ? "spin 0.7s linear infinite" : "none"
+    }
+  }))), /*#__PURE__*/React.createElement(TopBar, {
+    onLogo: goHome
+  }), loading ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 60
+    }
+  }, /*#__PURE__*/React.createElement(Spinner, null)) : /*#__PURE__*/React.createElement(React.Fragment, null, tab === "home" && /*#__PURE__*/React.createElement(HomeTab, {
+    ctx: ctx,
+    goTab: setTab
+  }), tab === "book" && /*#__PURE__*/React.createElement(BookTab, {
+    ctx: ctx
+  }), tab === "sales" && /*#__PURE__*/React.createElement(SalesTab, {
+    ctx: ctx
+  }), tab === "review" && /*#__PURE__*/React.createElement(ReviewTab, {
+    ctx: ctx
+  }), tab === "settings" && /*#__PURE__*/React.createElement(SettingsTab, {
+    ctx: ctx
+  }))), /*#__PURE__*/React.createElement(TabBar, {
+    active: tab,
+    onChange: setTab
+  }), detailRow && /*#__PURE__*/React.createElement(ReservationDetail, {
+    row: detailRow,
+    ctx: ctx,
+    onClose: () => setDetailId(null)
+  }), modelAssignRow && /*#__PURE__*/React.createElement(ModelAssignSheet, {
+    row: modelAssignRow,
+    onClose: () => setModelAssignRow(null),
+    onAssign: modelName => {
+      updateReservation(modelAssignRow.id, {
+        model: modelName
+      });
+      setModelAssignRow(null);
+    }
+  }), scheduleList && /*#__PURE__*/React.createElement(ScheduleListSheet, {
+    title: scheduleList.title,
+    events: resolveScheduleEvents(reservations, scheduleList),
+    ctx: ctx,
+    onClose: () => setScheduleList(null)
+  }), /*#__PURE__*/React.createElement(Toast, {
+    msg: toast
+  }));
+}
+
+/* =====================================================================
+   홈 (대시보드)
+===================================================================== */
+function HomeTab({
+  ctx,
+  goTab
+}) {
+  const {
+    reservations,
+    setDetailRes
+  } = ctx;
+  const today = new Date();
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState([]);
+  const [pendingBulkStatus, setPendingBulkStatus] = useState(null);
+  const newReservations = useMemo(() => sortByRecency(reservations.filter(r => r.status === "예약신청")), [reservations]);
+  const toggleSelect = id => setSelected(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  const toggleSelectAll = () => setSelected(prev => prev.length === newReservations.length ? [] : newReservations.map(r => r.id));
+  const exitSelectMode = () => {
+    setSelectMode(false);
+    setSelected([]);
+  };
+  const BULK_BUTTONS = [{
+    label: "확정",
+    status: "확정"
+  }, {
+    label: "반납",
+    status: "반납"
+  }, {
+    label: "대기",
+    status: "대기"
+  }, {
+    label: "취소",
+    status: "취소"
+  }];
+  const {
+    weekDays,
+    pickupEvents,
+    returnEvents
+  } = useMemo(() => computeScheduleEvents(reservations), [reservations]);
+
+  // 방법별 그룹 + 날짜별 건수 (날짜 오름차순, 건수 0인 날짜는 제외)
+  const groupByMethod = (events, methodField, methodOptions) => {
+    return methodOptions.map(method => {
+      const items = events.filter(e => (e[methodField] || "미선택") === method);
+      const byDay = weekDays.map(d => ({
+        day: d,
+        items: items.filter(e => sameDay(parseDotDate(e.methodDate), d))
+      })).filter(x => x.items.length > 0);
+      return {
+        method,
+        items,
+        byDay
+      };
+    }).filter(g => g.items.length > 0);
+  };
+  const pickupGroups = useMemo(() => groupByMethod(pickupEvents, "delivery", DELIVERY_OPTIONS), [pickupEvents]);
+  const returnGroups = useMemo(() => groupByMethod(returnEvents, "returnMethod", RETURN_OPTIONS), [returnEvents]);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      padding: "4px 16px 16px",
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "flex-start",
+      justifyContent: "space-between"
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "var(--muted)",
+      fontWeight: 600
+    }
+  }, today.getFullYear(), "년 ", today.getMonth() + 1, "월 ", today.getDate(), "일 ", WEEKDAYS[today.getDay()], "요일"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 19,
+      fontWeight: 800,
+      marginTop: 3,
+      letterSpacing: "-.02em"
+    }
+  }, "안녕하세요, 사장님 👋")), /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: ctx.loadAll,
+    style: {
+      width: 40,
+      height: 40,
+      background: "#fff",
+      borderRadius: 12,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      boxShadow: "0 1px 3px rgba(20,25,40,.08)"
+    }
+  }, /*#__PURE__*/React.createElement(Icon.refresh, {
+    width: 18,
+    height: 18
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800,
+      display: "flex",
+      alignItems: "center",
+      gap: 6
+    }
+  }, "🆕 신규 예약", newReservations.length > 0 && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      fontWeight: 800,
+      color: "var(--primary)",
+      background: "var(--primary-soft)",
+      padding: "2px 8px",
+      borderRadius: 20
+    }
+  }, newReservations.length)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10
+    }
+  }, newReservations.length > 0 && (selectMode ? /*#__PURE__*/React.createElement("span", {
+    className: "tap",
+    onClick: exitSelectMode,
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: "var(--muted)"
+    }
+  }, "취소") : /*#__PURE__*/React.createElement("span", {
+    className: "tap",
+    onClick: () => setSelectMode(true),
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: "var(--primary)"
+    }
+  }, "선택")), /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: () => goTab("book"),
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: "var(--primary)"
+    }
+  }, "전체보기 ›"))), selectMode && newReservations.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: toggleSelectAll,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "2px 4px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 20,
+      height: 20,
+      borderRadius: 6,
+      border: `2px solid ${selected.length === newReservations.length ? "var(--primary)" : "#d5d9e0"}`,
+      background: selected.length === newReservations.length ? "var(--primary)" : "#fff",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
+    }
+  }, selected.length === newReservations.length && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#fff",
+      fontSize: 12,
+      fontWeight: 800
+    }
+  }, "✓")), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12.5,
+      fontWeight: 700,
+      color: "var(--muted)"
+    }
+  }, "전체 선택 (", selected.length, "/", newReservations.length, ")")), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: "6px 4px",
+      marginBottom: selectMode && selected.length > 0 ? 70 : 0
+    }
+  }, newReservations.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "26px 14px",
+      textAlign: "center",
+      color: "var(--muted)",
+      fontSize: 13
+    }
+  }, "신규 예약이 없어요.") : newReservations.map((r, i) => {
+    const checked = selected.includes(r.id);
+    return /*#__PURE__*/React.createElement(React.Fragment, {
+      key: r.id
+    }, i > 0 && /*#__PURE__*/React.createElement("div", {
+      className: "divider"
+    }), /*#__PURE__*/React.createElement("div", {
+      className: "tap row-btn",
+      onClick: () => selectMode ? toggleSelect(r.id) : setDetailRes(r)
+    }, selectMode && /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 20,
+        height: 20,
+        borderRadius: 6,
+        border: `2px solid ${checked ? "var(--primary)" : "#d5d9e0"}`,
+        background: checked ? "var(--primary)" : "#fff",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flex: "0 0 auto"
+      }
+    }, checked && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: "#fff",
+        fontSize: 12,
+        fontWeight: 800
+      }
+    }, "✓")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: "var(--muted)",
+        marginBottom: 3
+      }
+    }, fmtOrderShort(r.orderTime)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11,
+        fontWeight: 800,
+        color: "var(--primary)",
+        background: "var(--primary-soft)",
+        padding: "2px 7px",
+        borderRadius: 8
+      }
+    }, r.model || "미배정"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 14,
+        fontWeight: 700
+      }
+    }, r.name || "이름없음"), r.phone && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11.5,
+        color: "var(--muted)",
+        fontWeight: 600
+      }
+    }, r.phone)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        color: "var(--muted)",
+        marginTop: 3,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap"
+      }
+    }, fmtShortDateDot(r.startDate), " ~ ", fmtShortDateDot(r.endDate), " · ", r.scheduleName || r.category || "예약신청")), !selectMode && /*#__PURE__*/React.createElement(StatusBadge, {
+      status: r.status
+    })));
+  })), selectMode && selected.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "fixed",
+      left: 0,
+      right: 0,
+      bottom: 62,
+      maxWidth: 480,
+      margin: "0 auto",
+      background: "#fff",
+      borderTop: "1px solid #eceef2",
+      padding: "10px 16px",
+      boxShadow: "0 -4px 16px rgba(20,25,40,.08)",
+      zIndex: 40
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      fontWeight: 700,
+      color: "var(--muted)",
+      marginBottom: 8
+    }
+  }, selected.length, "건 선택됨 · 상태 일괄 변경"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6
+    }
+  }, BULK_BUTTONS.map(b => /*#__PURE__*/React.createElement("div", {
+    key: b.label,
+    className: "tap",
+    onClick: () => setPendingBulkStatus(b.status),
+    style: {
+      flex: 1,
+      textAlign: "center",
+      padding: "10px 0",
+      borderRadius: 12,
+      fontSize: 12.5,
+      fontWeight: 800,
+      color: statusStyle(b.status).c,
+      background: statusStyle(b.status).bg
+    }
+  }, b.label)))), pendingBulkStatus && /*#__PURE__*/React.createElement(ConfirmDialog, {
+    title: `선택한 ${selected.length}건을 "${pendingBulkStatus}"로 변경할까요?`,
+    desc: "한 번에 여러 예약의 상태가 바뀌어요.",
+    confirmLabel: "변경",
+    onCancel: () => setPendingBulkStatus(null),
+    onConfirm: () => {
+      ctx.bulkUpdateStatus(selected, pendingBulkStatus);
+      setPendingBulkStatus(null);
+      exitSelectMode();
+    }
+  }), /*#__PURE__*/React.createElement(WeekGroupCard, {
+    icon: "📅",
+    title: "이번주 예약 인원",
+    accent: "var(--primary)",
+    accentSoft: "var(--primary-soft)",
+    total: pickupEvents.length,
+    groups: pickupGroups,
+    onOpenAll: () => ctx.setScheduleList({
+      title: "이번주 예약 인원 전체보기",
+      type: "pickup"
+    }),
+    onOpenMethod: g => ctx.setScheduleList({
+      title: `${g.method} 전체보기`,
+      type: "pickup",
+      method: g.method
+    }),
+    onOpenDay: (g, dayItem) => ctx.setScheduleList({
+      title: `${g.method} · ${dayItem.day.getMonth() + 1}/${dayItem.day.getDate()}(${WEEKDAYS[dayItem.day.getDay()]})`,
+      type: "pickup",
+      method: g.method,
+      day: dayItem.day
+    })
+  }), /*#__PURE__*/React.createElement(WeekGroupCard, {
+    icon: "📌",
+    title: "이번주 반납 인원",
+    accent: "#e11d48",
+    accentSoft: "#ffe4e6",
+    total: returnEvents.length,
+    groups: returnGroups,
+    onOpenAll: () => ctx.setScheduleList({
+      title: "이번주 반납 인원 전체보기",
+      type: "return"
+    }),
+    onOpenMethod: g => ctx.setScheduleList({
+      title: `${g.method} 전체보기`,
+      type: "return",
+      method: g.method
+    }),
+    onOpenDay: (g, dayItem) => ctx.setScheduleList({
+      title: `${g.method} · ${dayItem.day.getMonth() + 1}/${dayItem.day.getDate()}(${WEEKDAYS[dayItem.day.getDay()]})`,
+      type: "return",
+      method: g.method,
+      day: dayItem.day
+    })
+  }));
+}
+function WeekGroupCard({
+  icon,
+  title,
+  accent,
+  accentSoft,
+  total,
+  groups,
+  onOpenAll,
+  onOpenMethod,
+  onOpenDay
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: 16,
+      border: `1.5px solid ${accentSoft}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 14.5,
+      fontWeight: 800,
+      display: "flex",
+      alignItems: "center",
+      gap: 6
+    }
+  }, icon, " ", title), /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: onOpenAll,
+    style: {
+      fontSize: 11.5,
+      fontWeight: 700,
+      color: accent,
+      background: accentSoft,
+      padding: "5px 10px",
+      borderRadius: 20
+    }
+  }, "전체보기 (", total, ")")), groups.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "18px 0",
+      textAlign: "center",
+      color: "var(--muted)",
+      fontSize: 12.5
+    }
+  }, "이번주 일정이 없어요.") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, groups.map(g => /*#__PURE__*/React.createElement("div", {
+    key: g.method,
+    style: {
+      background: "#f7f8fa",
+      borderRadius: 14,
+      padding: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      fontWeight: 800
+    }
+  }, g.method), /*#__PURE__*/React.createElement("span", {
+    className: "tap",
+    onClick: () => onOpenMethod(g),
+    style: {
+      fontSize: 11.5,
+      fontWeight: 700,
+      color: accent
+    }
+  }, "전체보기"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: "var(--muted)"
+    }
+  }, g.items.length, "건")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 6
+    }
+  }, g.byDay.map((dayItem, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    className: "tap",
+    onClick: () => onOpenDay(g, dayItem),
+    style: {
+      border: `1.5px solid ${accentSoft}`,
+      borderRadius: 12,
+      padding: "7px 12px",
+      fontSize: 12,
+      fontWeight: 700,
+      color: accent,
+      background: "#fff"
+    }
+  }, dayItem.day.getMonth() + 1, "/", dayItem.day.getDate(), "(", WEEKDAYS[dayItem.day.getDay()], ") ", dayItem.items.length, "건")))))));
+}
+function StatCard({
+  label,
+  value,
+  color,
+  onClick
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "card tap",
+    onClick: onClick,
+    style: {
+      padding: "14px 10px",
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 21,
+      fontWeight: 800,
+      color
+    }
+  }, value ?? 0), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "var(--muted)",
+      marginTop: 2,
+      fontWeight: 600
+    }
+  }, label));
+}
+function StatusBadge({
+  status
+}) {
+  const st = statusStyle(normalizeStatus(status));
+  return /*#__PURE__*/React.createElement("span", {
+    className: "badge",
+    style: {
+      color: st.c,
+      background: st.bg
+    }
+  }, displayStatus(status));
+}
+function PaymentBadge({
+  method
+}) {
+  const isTransfer = (method || "").includes("계좌") || (method || "").includes("이체");
+  const label = isTransfer ? "이체" : "카드";
+  return /*#__PURE__*/React.createElement("span", {
+    className: "badge",
+    style: {
+      color: isTransfer ? "#7a5cff" : "#f79009",
+      background: isTransfer ? "#eee8ff" : "#fdf0dc"
+    }
+  }, label);
+}
+
+/* =====================================================================
+   예약 목록
+===================================================================== */
+function BookTab({
+  ctx
+}) {
+  const {
+    reservations,
+    setDetailRes
+  } = ctx;
+  const [filter, setFilter] = useState("전체");
+  const [q, setQ] = useState("");
+  const [dateFilter, setDateFilter] = useState([]); // 대여시작일 필터 (dateKey 배열, 다중선택)
+  const [showAllModels, setShowAllModels] = useState(false); // 날짜필터에서 배정된 모델도 모두 볼지 여부
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState([]); // 선택된 id 배열
+  const [pendingBulkStatus, setPendingBulkStatus] = useState(null);
+  const today = new Date();
+  const counts = useMemo(() => {
+    const c = {
+      "전체": reservations.length
+    };
+    STATUS_LIST.forEach(s => {
+      c[s] = reservations.filter(r => normalizeStatus(r.status) === s).length;
+    });
+    return c;
+  }, [reservations]);
+
+  // 대여시작일 기준 날짜별 필터 칩 (오늘 이후만, 배정된 모델은 기본적으로 제외)
+  const upcomingDateChips = useMemo(() => {
+    const map = {}; // dateKey -> { day: Date, count }
+    reservations.forEach(r => {
+      if (!showAllModels && isModelNumberAssigned(r.model)) return;
+      const d = parseDotDate(r.startDate);
+      if (!d) return;
+      if (d < new Date(today.getFullYear(), today.getMonth(), today.getDate())) return; // 지난 날짜 제외
+      const key = dateKeyFromDate(d);
+      if (!map[key]) map[key] = {
+        day: d,
+        count: 0,
+        key
+      };
+      map[key].count += 1;
+    });
+    return Object.values(map).sort((a, b) => a.day - b.day);
+  }, [reservations, showAllModels]);
+  const filtered = useMemo(() => {
+    return reservations.filter(r => {
+      if (filter !== "전체" && normalizeStatus(r.status) !== filter) return false;
+      if (dateFilter.length > 0) {
+        const d = parseDotDate(r.startDate);
+        if (!d || !dateFilter.includes(dateKeyFromDate(d))) return false;
+        if (!showAllModels && isModelNumberAssigned(r.model)) return false;
+      }
+      if (q.trim()) {
+        const t = q.trim();
+        return (r.name || "").includes(t) || (r.phone || "").includes(t);
+      }
+      return true;
+    });
+  }, [reservations, filter, dateFilter, q, showAllModels]);
+  const toggleSelect = id => setSelected(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  const toggleSelectAll = () => setSelected(prev => prev.length === filtered.length ? [] : filtered.map(r => r.id));
+  const exitSelectMode = () => {
+    setSelectMode(false);
+    setSelected([]);
+  };
+
+  // 길게 누르면 선택모드로 진입 + 해당 항목 자동 선택
+  const longPressTimer = useRef(null);
+  const longPressFired = useRef(false);
+  const startLongPress = id => {
+    longPressFired.current = false;
+    longPressTimer.current = setTimeout(() => {
+      longPressFired.current = true;
+      setSelectMode(true);
+      setSelected(prev => prev.includes(id) ? prev : [...prev, id]);
+    }, 480);
+  };
+  const cancelLongPress = () => {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  };
+  const handleCardClick = r => {
+    if (longPressFired.current) {
+      longPressFired.current = false;
+      return;
+    } // 롱프레스 직후 발생하는 클릭은 무시
+    selectMode ? toggleSelect(r.id) : setDetailRes(r);
+  };
+  const BULK_BUTTONS = [{
+    label: "확정",
+    status: "확정"
+  }, {
+    label: "반납",
+    status: "반납"
+  }, {
+    label: "대기",
+    status: "대기"
+  }, {
+    label: "취소",
+    status: "취소"
+  }];
+
+  // 선택한 항목들의 대여모델 수량 / 수령방법 요약
+  const selectedSummary = useMemo(() => {
+    const items = reservations.filter(r => selected.includes(r.id));
+    const modelCounts = {};
+    const deliveryCounts = {};
+    items.forEach(r => {
+      const tag = parseModelTag(r.model).tag || r.model || "미배정";
+      modelCounts[tag] = (modelCounts[tag] || 0) + 1;
+      const dm = r.delivery || "미선택";
+      deliveryCounts[dm] = (deliveryCounts[dm] || 0) + 1;
+    });
+    return {
+      modelCounts: Object.entries(modelCounts),
+      deliveryCounts: Object.entries(deliveryCounts)
+    };
+  }, [reservations, selected]);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      padding: "4px 16px 16px",
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 21,
+      fontWeight: 800,
+      letterSpacing: "-.02em"
+    }
+  }, "예약 관리"), selectMode ? /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: exitSelectMode,
+    style: {
+      fontSize: 12.5,
+      fontWeight: 700,
+      color: "var(--muted)"
+    }
+  }, "취소") : /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: () => setShowAllModels(v => !v),
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: showAllModels ? "var(--muted)" : "var(--primary)",
+      background: showAllModels ? "#eef1f6" : "var(--primary-soft)",
+      padding: "5px 10px",
+      borderRadius: 20
+    }
+  }, showAllModels ? "배정 숨기기" : "모두보기")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      background: "#fff",
+      borderRadius: 14,
+      padding: "10px 14px",
+      boxShadow: "0 1px 3px rgba(20,25,40,.06)"
+    }
+  }, /*#__PURE__*/React.createElement(Icon.search, {
+    width: 17,
+    height: 17,
+    color: "#9aa1ad"
+  }), /*#__PURE__*/React.createElement("input", {
+    value: q,
+    onChange: e => setQ(e.target.value),
+    placeholder: "이름 또는 전화번호 검색",
+    style: {
+      border: "none",
+      outline: "none",
+      fontSize: 13,
+      flex: 1,
+      background: "transparent"
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      overflowX: "auto"
+    },
+    className: "scr"
+  }, ["전체", ...STATUS_LIST].map(s => /*#__PURE__*/React.createElement("div", {
+    key: s,
+    className: "tap pill",
+    onClick: () => setFilter(s),
+    style: {
+      color: filter === s ? "#fff" : "var(--muted)",
+      background: filter === s ? "var(--primary)" : "#fff",
+      flex: "0 0 auto"
+    }
+  }, s, " ", counts[s] ?? 0))), upcomingDateChips.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      overflowX: "auto"
+    },
+    className: "scr"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: () => setDateFilter([]),
+    style: {
+      flex: "0 0 auto",
+      padding: "7px 12px",
+      borderRadius: 20,
+      fontSize: 12,
+      fontWeight: 700,
+      color: dateFilter.length === 0 ? "#fff" : "var(--muted)",
+      background: dateFilter.length === 0 ? "var(--primary)" : "#fff"
+    }
+  }, "전체 날짜"), upcomingDateChips.map(c => {
+    const on = dateFilter.includes(c.key);
+    return /*#__PURE__*/React.createElement("div", {
+      key: c.key,
+      className: "tap",
+      onClick: () => setDateFilter(prev => prev.includes(c.key) ? prev.filter(k => k !== c.key) : [...prev, c.key]),
+      style: {
+        flex: "0 0 auto",
+        padding: "7px 12px",
+        borderRadius: 20,
+        fontSize: 12,
+        fontWeight: 700,
+        color: on ? "#fff" : "var(--ink)",
+        background: on ? "var(--primary)" : "#fff"
+      }
+    }, c.day.getMonth() + 1, "/", c.day.getDate(), "(", WEEKDAYS[c.day.getDay()], ") ", c.count, "건");
+  })), selectMode && /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: toggleSelectAll,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "2px 4px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 20,
+      height: 20,
+      borderRadius: 6,
+      border: `2px solid ${selected.length === filtered.length && filtered.length > 0 ? "var(--primary)" : "#d5d9e0"}`,
+      background: selected.length === filtered.length && filtered.length > 0 ? "var(--primary)" : "#fff",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
+    }
+  }, selected.length === filtered.length && filtered.length > 0 && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#fff",
+      fontSize: 12,
+      fontWeight: 800
+    }
+  }, "✓")), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12.5,
+      fontWeight: 700,
+      color: "var(--muted)"
+    }
+  }, "전체 선택 (", selected.length, "/", filtered.length, ")")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10,
+      paddingBottom: selectMode && selected.length > 0 ? 130 : 0
+    }
+  }, filtered.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      padding: "40px 0",
+      color: "var(--muted)",
+      fontSize: 13
+    }
+  }, "해당하는 예약이 없어요."), filtered.map(r => {
+    const checked = selected.includes(r.id);
+    return /*#__PURE__*/React.createElement("div", {
+      key: r.id,
+      className: "card tap",
+      onClick: () => handleCardClick(r),
+      onTouchStart: () => startLongPress(r.id),
+      onTouchEnd: cancelLongPress,
+      onTouchMove: cancelLongPress,
+      onMouseDown: () => startLongPress(r.id),
+      onMouseUp: cancelLongPress,
+      onMouseLeave: cancelLongPress,
+      style: {
+        padding: 14,
+        display: "flex",
+        gap: 10,
+        border: selectMode && checked ? "1.5px solid var(--primary)" : "1.5px solid transparent"
+      }
+    }, selectMode && /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: "0 0 auto",
+        paddingTop: 2
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 20,
+        height: 20,
+        borderRadius: 6,
+        border: `2px solid ${checked ? "var(--primary)" : "#d5d9e0"}`,
+        background: checked ? "var(--primary)" : "#fff",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center"
+      }
+    }, checked && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: "#fff",
+        fontSize: 12,
+        fontWeight: 800
+      }
+    }, "✓"))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: "var(--muted)",
+        marginBottom: 4
+      }
+    }, fmtOrderShort(r.orderTime)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "tap",
+      onClick: e => {
+        e.stopPropagation();
+        ctx.setModelAssignRow(r);
+      },
+      style: {
+        fontSize: 11,
+        fontWeight: 800,
+        color: "var(--primary)",
+        background: "var(--primary-soft)",
+        padding: "3px 8px",
+        borderRadius: 8,
+        flex: "0 0 auto"
+      }
+    }, r.model || "미배정"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 15,
+        fontWeight: 700,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap"
+      }
+    }, r.name || "이름없음"), r.phone && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        fontWeight: 600,
+        color: "var(--muted)"
+      }
+    }, r.phone), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1
+      }
+    }), /*#__PURE__*/React.createElement(StatusBadge, {
+      status: r.status
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        marginTop: 6,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11.5,
+        fontWeight: 700,
+        color: "var(--muted)",
+        flex: "0 0 auto"
+      }
+    }, fmtShortDateDot(r.startDate), " ~ ", fmtShortDateDot(r.endDate)), r.scheduleName && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        color: "var(--sub2)",
+        fontWeight: 600,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+        flex: "1 1 0%",
+        minWidth: 0
+      }
+    }, "🎫 ", r.scheduleName)), r.address && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11.5,
+        color: "var(--muted)",
+        marginTop: 5,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap"
+      }
+    }, "📍 ", r.address), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        marginTop: 8,
+        paddingTop: 8,
+        borderTop: "1px solid var(--line)"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11.5,
+        color: "var(--muted)",
+        fontWeight: 600
+      }
+    }, "📦 ", r.delivery || "-"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11.5,
+        color: "var(--muted)",
+        fontWeight: 600
+      }
+    }, "↩️ ", r.returnMethod || "-"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        marginLeft: "auto",
+        display: "flex",
+        alignItems: "center",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement(PaymentBadge, {
+      method: r.paymentMethod
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 13,
+        fontWeight: 800,
+        color: "var(--primary)"
+      }
+    }, fmtMoney(r.totalPrice))))));
+  })), selectMode && selected.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "fixed",
+      left: 0,
+      right: 0,
+      bottom: 62,
+      maxWidth: 480,
+      margin: "0 auto",
+      background: "#fff",
+      borderTop: "1px solid #eceef2",
+      padding: "10px 16px",
+      boxShadow: "0 -4px 16px rgba(20,25,40,.08)",
+      zIndex: 40
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      fontWeight: 700,
+      color: "var(--muted)",
+      marginBottom: 6
+    }
+  }, selected.length, "건 선택됨 · 상태 일괄 변경"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 4,
+      marginBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 10.5,
+      color: "var(--muted)",
+      fontWeight: 700,
+      marginRight: 2
+    }
+  }, "📱"), selectedSummary.modelCounts.map(([tag, cnt]) => /*#__PURE__*/React.createElement("span", {
+    key: tag,
+    style: {
+      fontSize: 10.5,
+      fontWeight: 700,
+      color: "var(--primary)",
+      background: "var(--primary-soft)",
+      padding: "2px 7px",
+      borderRadius: 20
+    }
+  }, tag, " ", cnt))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 4,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 10.5,
+      color: "var(--muted)",
+      fontWeight: 700,
+      marginRight: 2
+    }
+  }, "📦"), selectedSummary.deliveryCounts.map(([dm, cnt]) => /*#__PURE__*/React.createElement("span", {
+    key: dm,
+    style: {
+      fontSize: 10.5,
+      fontWeight: 700,
+      color: "#7a5cff",
+      background: "#eee8ff",
+      padding: "2px 7px",
+      borderRadius: 20
+    }
+  }, dm, " ", cnt))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6
+    }
+  }, BULK_BUTTONS.map(b => /*#__PURE__*/React.createElement("div", {
+    key: b.label,
+    className: "tap",
+    onClick: () => setPendingBulkStatus(b.status),
+    style: {
+      flex: 1,
+      textAlign: "center",
+      padding: "10px 0",
+      borderRadius: 12,
+      fontSize: 12.5,
+      fontWeight: 800,
+      color: statusStyle(b.status).c,
+      background: statusStyle(b.status).bg
+    }
+  }, b.label)))), pendingBulkStatus && /*#__PURE__*/React.createElement(ConfirmDialog, {
+    title: `선택한 ${selected.length}건을 "${pendingBulkStatus}"로 변경할까요?`,
+    desc: "한 번에 여러 예약의 상태가 바뀌어요.",
+    confirmLabel: "변경",
+    onCancel: () => setPendingBulkStatus(null),
+    onConfirm: () => {
+      ctx.bulkUpdateStatus(selected, pendingBulkStatus);
+      setPendingBulkStatus(null);
+      exitSelectMode();
+    }
+  }));
+}
+
+/* =====================================================================
+   예약 상세 (전체 화면 오버레이)
+===================================================================== */
+const DELIVERY_OPTIONS = ["택배수령", "퀵수령", "공연장수령", "사무실수령"];
+const RETURN_OPTIONS = ["방문수거", "택배반납", "사무실반납", "당일반납", "공연장반납"];
+function DetailRowList({
+  items,
+  editMode,
+  form,
+  setF,
+  inputStyle
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: "4px 4px"
+    }
+  }, items.map((r, i) => /*#__PURE__*/React.createElement(React.Fragment, {
+    key: i
+  }, i > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "divider"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: r.onClick ? "row-btn tap" : "row-btn",
+    onClick: r.onClick
+  }, /*#__PURE__*/React.createElement(r.icon, {
+    width: 19,
+    height: 19,
+    color: "#9aa1ad"
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      color: "var(--muted)",
+      fontWeight: 600,
+      flex: "0 0 auto"
+    }
+  }, r.label), editMode && r.field ? r.options ? /*#__PURE__*/React.createElement("select", {
+    value: form[r.field],
+    onChange: e => setF(r.field, e.target.value),
+    style: {
+      ...inputStyle,
+      marginLeft: "auto",
+      maxWidth: 160
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "미선택"), r.options.map(o => /*#__PURE__*/React.createElement("option", {
+    key: o,
+    value: o
+  }, o))) : /*#__PURE__*/React.createElement("input", {
+    value: form[r.field],
+    onChange: e => setF(r.field, r.numeric ? e.target.value.replace(/[^0-9]/g, "") : e.target.value),
+    placeholder: r.placeholder || r.label,
+    inputMode: r.numeric ? "numeric" : "text",
+    style: {
+      ...inputStyle,
+      marginLeft: "auto",
+      maxWidth: 170
+    }
+  }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      marginLeft: "auto",
+      fontSize: 14,
+      fontWeight: 700,
+      color: r.highlight ? "var(--primary)" : r.onClick ? "var(--primary)" : "var(--ink)",
+      textAlign: "right"
+    }
+  }, r.value), r.onClick && /*#__PURE__*/React.createElement(Icon.chevRight, {
+    width: 14,
+    height: 14,
+    color: "var(--primary)"
+  }))))));
+}
+function ReservationDetail({
+  row,
+  ctx,
+  onClose
+}) {
+  const [tracking, setTracking] = useState(row.trackingNumber || "");
+  const [memo, setMemo] = useState(row.memo || "");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [pendingStatus, setPendingStatus] = useState(null); // 상태 변경 확인 팝업
+  const [pendingExtend, setPendingExtend] = useState(false); // 대여연장 확인 팝업
+  const [editMode, setEditMode] = useState(false);
+  const [form, setForm] = useState(null);
+  const status = normalizeStatus(row.status);
+
+  // 대여연장: 반납일 +1일, 갤럭시 15,000원 / 아이폰 20,000원 추가
+  const isIphoneModel = parseModelTag(row.model).tag.includes("P");
+  const extendFee = isIphoneModel ? 20000 : 15000;
+  const extendedEndDate = (() => {
+    const d = parseDotDate(row.endDate);
+    if (!d) return null;
+    d.setDate(d.getDate() + 1);
+    return `${d.getFullYear()}. ${d.getMonth() + 1}. ${d.getDate()}`;
+  })();
+  const applyExtend = () => {
+    if (!extendedEndDate) {
+      ctx.showToast("반납일 정보를 확인할 수 없어요");
+      return;
+    }
+    ctx.updateReservation(row.id, {
+      endDate: extendedEndDate,
+      totalPrice: (Number(row.totalPrice) || 0) + extendFee
+    });
+  };
+  // 고객이 대여한 사진을 별도로 백업했다는 표시를 메모에 남김 (예약 목록 백업과는 무관)
+  const markBackup = () => {
+    const stamp = new Date().toLocaleDateString("ko-KR", {
+      month: "numeric",
+      day: "numeric"
+    });
+    const next = memo ? `${memo}\n백업 (${stamp})` : `백업 (${stamp})`;
+    setMemo(next);
+    ctx.updateReservation(row.id, {
+      memo: next
+    });
+    ctx.showToast("메모에 '백업'을 추가했어요");
+  };
+  const startEdit = () => {
+    setForm({
+      name: row.name || "",
+      phone: row.phone || "",
+      scheduleName: row.scheduleName || "",
+      startDate: row.startDate || "",
+      endDate: row.endDate || "",
+      delivery: row.delivery || "",
+      returnMethod: row.returnMethod || "",
+      battery: row.battery || "",
+      totalPrice: row.totalPrice ?? "",
+      paymentMethod: row.paymentMethod || "",
+      account: row.account || "",
+      address: row.address || "",
+      zipcode: row.zipcode || ""
+    });
+    setEditMode(true);
+  };
+  const saveEdit = () => {
+    ctx.updateReservation(row.id, {
+      ...form,
+      totalPrice: Number(form.totalPrice) || 0
+    });
+    setEditMode(false);
+    setForm(null);
+  };
+  const setF = (key, val) => setForm(prev => ({
+    ...prev,
+    [key]: val
+  }));
+  const inputStyle = {
+    width: "100%",
+    height: 40,
+    borderRadius: 10,
+    border: "1.5px solid #e6e9f0",
+    padding: "0 12px",
+    fontSize: 13.5,
+    fontWeight: 600,
+    outline: "none",
+    textAlign: "right",
+    background: "#fff"
+  };
+  const ACTION_BUTTONS = [{
+    label: "확정",
+    status: "확정"
+  }, {
+    label: "반납",
+    status: "반납"
+  }, {
+    label: "대기",
+    status: "대기"
+  }, {
+    label: "취소",
+    status: "취소"
+  }];
+  const rows = [{
+    icon: Icon.book,
+    label: "구분",
+    value: row.category || "예약신청"
+  }, {
+    icon: Icon.ticket,
+    label: "일정명",
+    value: row.scheduleName || "-",
+    field: "scheduleName"
+  }, {
+    icon: Icon.calendar,
+    label: "대여시작",
+    value: fmtShortDateDot(row.startDate),
+    field: "startDate",
+    placeholder: "예: 2026. 7. 4"
+  }, {
+    icon: Icon.calendar,
+    label: "대여종료",
+    value: fmtShortDateDot(row.endDate),
+    field: "endDate",
+    placeholder: "예: 2026. 7. 6"
+  }, {
+    icon: Icon.phone,
+    label: "연락처",
+    value: row.phone || "-",
+    field: "phone"
+  }, {
+    icon: Icon.truck,
+    label: "수령방법",
+    value: row.delivery || "-",
+    field: "delivery",
+    options: DELIVERY_OPTIONS
+  }, {
+    icon: Icon.truck,
+    label: "반납방법",
+    value: row.returnMethod || "-",
+    field: "returnMethod",
+    options: RETURN_OPTIONS
+  }, {
+    icon: Icon.box,
+    label: "모델",
+    value: row.model || "미배정",
+    onClick: !editMode ? () => ctx.setModelAssignRow(row) : null
+  }, {
+    icon: Icon.battery,
+    label: "보조배터리",
+    value: row.battery || "없음",
+    field: "battery"
+  }, {
+    icon: Icon.won,
+    label: "결제금액",
+    value: fmtMoney(row.totalPrice),
+    highlight: true,
+    field: "totalPrice",
+    numeric: true
+  }, {
+    icon: Icon.won,
+    label: "결제방법",
+    value: row.paymentMethod || "-",
+    field: "paymentMethod"
+  }];
+  const isQuick = (row.delivery || "").includes("퀵");
+  const quickCopyText = `이름: ${row.name || "-"}\n연락처: ${row.phone || "-"}\n주소: ${[row.zipcode ? `[${row.zipcode}]` : "", row.address || "-"].filter(Boolean).join(" ")}`;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fadein",
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "var(--bg)",
+      zIndex: 100,
+      display: "flex",
+      flexDirection: "column",
+      maxWidth: 480,
+      margin: "0 auto"
+    }
+  }, /*#__PURE__*/React.createElement(TopBar, {
+    onLogo: ctx.goHome
+  }), /*#__PURE__*/React.createElement(PageHeader, {
+    title: "예약 상세",
+    onBack: onClose,
+    right: editMode ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "tap",
+      onClick: () => {
+        setEditMode(false);
+        setForm(null);
+      },
+      style: {
+        fontSize: 12.5,
+        fontWeight: 700,
+        color: "var(--muted)",
+        padding: "8px 4px"
+      }
+    }, "취소"), /*#__PURE__*/React.createElement("span", {
+      className: "tap",
+      onClick: saveEdit,
+      style: {
+        fontSize: 12.5,
+        fontWeight: 800,
+        color: "var(--primary)",
+        padding: "8px 4px"
+      }
+    }, "저장")) : /*#__PURE__*/React.createElement("span", {
+      className: "tap",
+      onClick: startEdit,
+      style: {
+        fontSize: 12.5,
+        fontWeight: 800,
+        color: "var(--primary)",
+        padding: "8px 4px"
+      }
+    }, "편집")
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "scr",
+    style: {
+      flex: 1,
+      overflowY: "auto",
+      padding: "4px 16px 16px",
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6
+    }
+  }, ACTION_BUTTONS.map(b => {
+    const on = status === b.status;
+    const st = statusStyle(b.status);
+    return /*#__PURE__*/React.createElement("div", {
+      key: b.label,
+      className: "tap",
+      onClick: () => setPendingStatus(b.status),
+      style: {
+        flex: 1,
+        textAlign: "center",
+        padding: "10px 0",
+        borderRadius: 12,
+        fontSize: 12.5,
+        fontWeight: 800,
+        color: on ? "#fff" : st.c,
+        background: on ? st.c : st.bg
+      }
+    }, b.label);
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: () => setConfirmDelete(true),
+    style: {
+      flex: 1,
+      textAlign: "center",
+      padding: "10px 0",
+      borderRadius: 12,
+      fontSize: 12.5,
+      fontWeight: 800,
+      color: "var(--red)",
+      background: "var(--red-soft)"
+    }
+  }, "삭제")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      marginTop: 6
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: () => setPendingExtend(true),
+    style: {
+      flex: 1,
+      textAlign: "center",
+      padding: "10px 0",
+      borderRadius: 12,
+      fontSize: 12.5,
+      fontWeight: 800,
+      color: "var(--primary)",
+      background: "var(--primary-soft)"
+    }
+  }, "대여연장"), /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: markBackup,
+    style: {
+      flex: 1,
+      textAlign: "center",
+      padding: "10px 0",
+      borderRadius: 12,
+      fontSize: 12.5,
+      fontWeight: 800,
+      color: "#7a5cff",
+      background: "#eee8ff"
+    }
+  }, "백업"))), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: 18,
+      display: "flex",
+      alignItems: "center",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, editMode ? /*#__PURE__*/React.createElement("input", {
+    value: form.name,
+    onChange: e => setF("name", e.target.value),
+    placeholder: "이름",
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      border: "1.5px solid #e6e9f0",
+      borderRadius: 10,
+      padding: "6px 10px",
+      width: "100%",
+      outline: "none",
+      marginBottom: 6
+    }
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 17,
+      fontWeight: 800
+    }
+  }, row.name || "이름없음"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: "var(--muted)",
+      marginTop: 3
+    }
+  }, "예약번호 #", row.id)), !editMode && row.phone && /*#__PURE__*/React.createElement("a", {
+    href: `tel:${row.phone}`,
+    style: {
+      width: 40,
+      height: 40,
+      borderRadius: 12,
+      background: "var(--primary)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      boxShadow: "0 8px 14px -6px rgba(31,107,255,.6)"
+    }
+  }, /*#__PURE__*/React.createElement(Icon.phone, {
+    width: 18,
+    height: 18,
+    color: "#fff"
+  }))), /*#__PURE__*/React.createElement(DetailRowList, {
+    items: rows,
+    editMode: editMode,
+    form: form,
+    setF: setF,
+    inputStyle: inputStyle
+  }), (editMode || row.address || row.zipcode) && /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: "15px 16px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: "var(--muted)",
+      marginBottom: 8
+    }
+  }, "배송 주소"), editMode ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: form.zipcode,
+    onChange: e => setF("zipcode", e.target.value),
+    placeholder: "우편번호",
+    style: {
+      height: 40,
+      borderRadius: 10,
+      border: "1.5px solid #e6e9f0",
+      padding: "0 12px",
+      fontSize: 13,
+      outline: "none"
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    value: form.address,
+    onChange: e => setF("address", e.target.value),
+    placeholder: "주소",
+    style: {
+      height: 40,
+      borderRadius: 10,
+      border: "1.5px solid #e6e9f0",
+      padding: "0 12px",
+      fontSize: 13,
+      outline: "none"
+    }
+  })) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      lineHeight: 1.55,
+      color: "var(--sub2)"
+    }
+  }, "[", row.zipcode, "] ", row.address)), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: "15px 16px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: "var(--muted)",
+      marginBottom: 8
+    }
+  }, "계좌번호 (환불/취소 시 환급)"), editMode ? /*#__PURE__*/React.createElement("input", {
+    value: form.account,
+    onChange: e => setF("account", e.target.value),
+    placeholder: "은행, 계좌번호",
+    style: {
+      width: "100%",
+      height: 40,
+      borderRadius: 10,
+      border: "1.5px solid #e6e9f0",
+      padding: "0 12px",
+      fontSize: 13,
+      outline: "none"
+    }
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      fontSize: 14,
+      fontWeight: 700,
+      color: "var(--ink)"
+    }
+  }, row.account || "-"), row.account && /*#__PURE__*/React.createElement("button", {
+    onClick: () => copyText(row.account, ctx.showToast),
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 4,
+      padding: "8px 12px",
+      borderRadius: 10,
+      background: "var(--primary-soft)",
+      color: "var(--primary)",
+      fontWeight: 700,
+      fontSize: 12
+    }
+  }, /*#__PURE__*/React.createElement(Icon.copy, {
+    width: 13,
+    height: 13
+  }), " 복사"))), isQuick && /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: "15px 16px",
+      background: "#fdf0dc"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      fontSize: 13,
+      fontWeight: 800,
+      color: "#b45309"
+    }
+  }, /*#__PURE__*/React.createElement(Icon.zap, {
+    width: 15,
+    height: 15
+  }), " 퀵 배송 정보"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => copyText(quickCopyText, ctx.showToast),
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 4,
+      padding: "7px 12px",
+      borderRadius: 10,
+      background: "#f79009",
+      color: "#fff",
+      fontWeight: 700,
+      fontSize: 12
+    }
+  }, /*#__PURE__*/React.createElement(Icon.copy, {
+    width: 13,
+    height: 13
+  }), " 일괄 복사")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      lineHeight: 1.7,
+      color: "#7c4a03",
+      whiteSpace: "pre-wrap"
+    }
+  }, quickCopyText)), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: "15px 16px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: "var(--muted)",
+      marginBottom: 8
+    }
+  }, "운송장 번호"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: tracking,
+    onChange: e => setTracking(e.target.value),
+    placeholder: "운송장 번호 입력",
+    style: {
+      flex: 1,
+      height: 42,
+      borderRadius: 12,
+      border: "1.5px solid #e6e9f0",
+      padding: "0 12px",
+      fontSize: 13,
+      outline: "none"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => ctx.updateReservation(row.id, {
+      trackingNumber: tracking
+    }),
+    style: {
+      padding: "0 16px",
+      borderRadius: 12,
+      background: "var(--primary-soft)",
+      color: "var(--primary)",
+      fontWeight: 700,
+      fontSize: 13
+    }
+  }, "저장"))), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: "15px 16px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: "var(--muted)",
+      marginBottom: 8
+    }
+  }, "메모"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("textarea", {
+    value: memo,
+    onChange: e => setMemo(e.target.value),
+    placeholder: "이 예약에 대한 메모를 남겨보세요",
+    rows: 3,
+    style: {
+      width: "100%",
+      borderRadius: 12,
+      border: "1.5px solid #e6e9f0",
+      padding: "10px 12px",
+      fontSize: 13,
+      outline: "none",
+      resize: "vertical",
+      fontFamily: "inherit"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => ctx.updateReservation(row.id, {
+      memo
+    }),
+    style: {
+      alignSelf: "flex-end",
+      padding: "8px 16px",
+      borderRadius: 12,
+      background: "var(--primary-soft)",
+      color: "var(--primary)",
+      fontWeight: 700,
+      fontSize: 13
+    }
+  }, "저장"))), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: "15px 16px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: "var(--muted)"
+    }
+  }, "대여연장"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      fontWeight: 700,
+      color: "var(--muted)"
+    }
+  }, isIphoneModel ? "아이폰" : "갤럭시", " · +₩", extendFee.toLocaleString())), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: "var(--sub2)",
+      marginBottom: 10
+    }
+  }, "반납일 ", fmtShortDateDot(row.endDate), " → ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: "var(--primary)"
+    }
+  }, extendedEndDate ? fmtShortDateDot(extendedEndDate) : "-"), " (+1일)"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setPendingExtend(true),
+    disabled: !extendedEndDate,
+    style: {
+      width: "100%",
+      height: 44,
+      borderRadius: 12,
+      background: extendedEndDate ? "var(--primary)" : "#e3e7ef",
+      color: "#fff",
+      fontWeight: 800,
+      fontSize: 14
+    }
+  }, "1일 연장하기 (+₩", extendFee.toLocaleString(), ")"))), pendingExtend && /*#__PURE__*/React.createElement(ConfirmDialog, {
+    title: "대여기간을 1일 연장할까요?",
+    desc: `반납일이 ${extendedEndDate ? fmtShortDateDot(extendedEndDate) : "-"}로 변경되고, 결제금액에 ₩${extendFee.toLocaleString()}이 추가돼요.`,
+    confirmLabel: "연장",
+    onCancel: () => setPendingExtend(false),
+    onConfirm: () => {
+      applyExtend();
+      setPendingExtend(false);
+    }
+  }), pendingStatus && /*#__PURE__*/React.createElement(ConfirmDialog, {
+    title: `상태를 "${pendingStatus}"로 변경할까요?`,
+    desc: `${row.name || "이름없음"}님의 예약 상태가 변경돼요.`,
+    confirmLabel: "변경",
+    onCancel: () => setPendingStatus(null),
+    onConfirm: () => {
+      ctx.updateReservation(row.id, {
+        status: pendingStatus
+      });
+      setPendingStatus(null);
+    }
+  }), confirmDelete && /*#__PURE__*/React.createElement(ConfirmDialog, {
+    title: "예약을 삭제할까요?",
+    desc: `${row.name || ""}님의 예약 정보가 영구히 삭제돼요.`,
+    confirmLabel: "삭제",
+    danger: true,
+    onCancel: () => setConfirmDelete(false),
+    onConfirm: () => {
+      ctx.deleteReservation(row.id);
+      setConfirmDelete(false);
+    }
+  }));
+}
+function ConfirmDialog({
+  title,
+  desc,
+  confirmLabel,
+  danger,
+  onCancel,
+  onConfirm
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fadein",
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(10,12,18,.45)",
+      zIndex: 200,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 28
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card sheet",
+    style: {
+      padding: 22,
+      width: "100%",
+      maxWidth: 320
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800
+    }
+  }, title), desc && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: "var(--muted)",
+      marginTop: 8,
+      lineHeight: 1.5
+    }
+  }, desc), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginTop: 18
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onCancel,
+    style: {
+      flex: 1,
+      height: 46,
+      borderRadius: 13,
+      background: "#f1f3f7",
+      fontWeight: 700,
+      fontSize: 14
+    }
+  }, "취소"), /*#__PURE__*/React.createElement("button", {
+    onClick: onConfirm,
+    style: {
+      flex: 1,
+      height: 46,
+      borderRadius: 13,
+      background: danger ? "var(--red)" : "var(--primary)",
+      color: "#fff",
+      fontWeight: 700,
+      fontSize: 14
+    }
+  }, confirmLabel))));
+}
+
+/* ---------- 일정 리스트 시트 (전체보기 / 날짜별) ---------- */
+function ScheduleListSheet({
+  title,
+  events,
+  ctx,
+  onClose
+}) {
+  const sorted = sortByRecency(events); // 최근 예약순으로 나열
+
+  // 모델 태그별 수량 집계 (예: 23U 12 · 24U 19 · 25U 2)
+  const modelCounts = useMemo(() => {
+    const order = [...MODEL_TAGS.map(m => m.tag), "미배정"];
+    const c = {};
+    events.forEach(r => {
+      const tag = parseModelTag(r.model).tag || "미배정";
+      c[tag] = (c[tag] || 0) + 1;
+    });
+    return order.filter(t => c[t] > 0).map(t => ({
+      tag: t,
+      count: c[t]
+    }));
+  }, [events]);
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fadein",
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(10,12,18,.4)",
+      zIndex: 260,
+      display: "flex",
+      alignItems: "flex-end",
+      maxWidth: 480,
+      margin: "0 auto"
+    },
+    onClick: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card sheet",
+    onClick: e => e.stopPropagation(),
+    style: {
+      width: "100%",
+      borderRadius: "24px 24px 0 0",
+      padding: "18px 16px 26px",
+      maxHeight: "82vh",
+      overflowY: "auto"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 36,
+      height: 4,
+      background: "#e3e7ef",
+      borderRadius: 4,
+      margin: "0 auto 14px"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      marginBottom: 4
+    }
+  }, title, " (", sorted.length, "건)"), modelCounts.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 6,
+      marginBottom: 14
+    }
+  }, modelCounts.map(m => /*#__PURE__*/React.createElement("div", {
+    key: m.tag,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 0,
+      borderRadius: 20,
+      overflow: "hidden",
+      boxShadow: "0 1px 2px rgba(20,25,40,.08)"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      fontWeight: 800,
+      color: "var(--ink)",
+      background: "#eef1f6",
+      padding: "5px 10px"
+    }
+  }, m.tag), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      fontWeight: 800,
+      color: "#fff",
+      background: "var(--primary)",
+      padding: "5px 10px"
+    }
+  }, m.count)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, sorted.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "24px 0",
+      textAlign: "center",
+      color: "var(--muted)",
+      fontSize: 13
+    }
+  }, "해당하는 예약이 없어요."), sorted.map((r, i) => {
+    const parsed = parseModelTag(r.model);
+    return /*#__PURE__*/React.createElement("div", {
+      key: i,
+      className: "tap",
+      onClick: () => {
+        onClose();
+        ctx.setDetailRes(r);
+      },
+      style: {
+        background: "#f7f8fa",
+        borderRadius: 14,
+        padding: 12
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6
+      }
+    }, r.kind && /*#__PURE__*/React.createElement("span", {
+      className: "badge",
+      style: {
+        color: r.kind === "픽업" ? "var(--primary)" : "var(--red)",
+        background: r.kind === "픽업" ? "var(--primary-soft)" : "var(--red-soft)"
+      }
+    }, r.kind), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 14,
+        fontWeight: 700
+      }
+    }, r.name || "이름없음"), r.phone && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11.5,
+        color: "var(--muted)",
+        fontWeight: 600
+      }
+    }, r.phone), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1
+      }
+    }), /*#__PURE__*/React.createElement(StatusBadge, {
+      status: r.status
+    })), /*#__PURE__*/React.createElement("div", {
+      className: "tap",
+      onClick: e => {
+        e.stopPropagation();
+        onClose();
+        ctx.setModelAssignRow(r);
+      },
+      style: {
+        display: "flex",
+        alignItems: "baseline",
+        gap: 4,
+        marginTop: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11.5,
+        color: "var(--muted)",
+        fontWeight: 600
+      }
+    }, "대여모델"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 13.5,
+        fontWeight: 800,
+        color: "var(--ink)"
+      }
+    }, parsed.tag || r.model || "미선택", /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: parsed.number ? "var(--primary)" : "var(--red)"
+      }
+    }, parsed.number ? parsed.number : " 미배정"))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        color: "var(--muted)",
+        marginTop: 6,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap"
+      }
+    }, r.scheduleName ? `🎫 ${r.scheduleName}` : r.category || "예약신청"), r.address && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11.5,
+        color: "var(--muted)",
+        marginTop: 3,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap"
+      }
+    }, "📍 ", r.address));
+  }))));
+}
+const MODEL_TAGS = [{
+  tag: "23U",
+  full: "갤럭시 S23울트라"
+}, {
+  tag: "24U",
+  full: "갤럭시 S24울트라"
+}, {
+  tag: "25U",
+  full: "갤럭시 S25울트라"
+}, {
+  tag: "26U",
+  full: "갤럭시 S26울트라"
+}, {
+  tag: "17P",
+  full: "아이폰 17프로"
+}, {
+  tag: "17PM",
+  full: "아이폰 17프로맥스"
+}];
+// "23U13" -> { tag: "23U", number: "13" } / "23U" -> { tag: "23U", number: "" }
+function parseModelTag(modelStr) {
+  const s = (modelStr || "").replace("+보조배터리", "");
+  const sorted = [...MODEL_TAGS].sort((a, b) => b.tag.length - a.tag.length);
+  for (const m of sorted) {
+    if (s.startsWith(m.tag)) {
+      return {
+        tag: m.tag,
+        number: s.slice(m.tag.length)
+      };
+    }
+  }
+  return {
+    tag: "",
+    number: ""
+  };
+}
+// 대여모델에 기기번호(숫자)가 배정되었는지 여부 (예: "23U13" → true, "23U" → false)
+function isModelNumberAssigned(modelStr) {
+  return !!parseModelTag(modelStr).number;
+}
+function ModelAssignSheet({
+  row,
+  onClose,
+  onAssign
+}) {
+  const parsed = parseModelTag(row.model);
+  const hadBattery = (row.model || "").includes("+보조배터리");
+  const [tag, setTag] = useState(parsed.tag);
+  const [number, setNumber] = useState(parsed.number);
+  const save = () => {
+    const final = `${tag}${number}${hadBattery ? "+보조배터리" : ""}`;
+    onAssign(final);
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fadein",
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(10,12,18,.4)",
+      zIndex: 250,
+      display: "flex",
+      alignItems: "flex-end",
+      maxWidth: 480,
+      margin: "0 auto"
+    },
+    onClick: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card sheet",
+    onClick: e => e.stopPropagation(),
+    style: {
+      width: "100%",
+      borderRadius: "24px 24px 0 0",
+      padding: "18px 16px 26px",
+      maxHeight: "80vh",
+      overflowY: "auto"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 36,
+      height: 4,
+      background: "#e3e7ef",
+      borderRadius: 4,
+      margin: "0 auto 14px"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      marginBottom: 4
+    }
+  }, "대여모델 배정"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: "var(--muted)",
+      marginBottom: 14
+    }
+  }, row.name || "이름없음", "님 · 현재: ", row.model || "미배정"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: "var(--muted)",
+      marginBottom: 8
+    }
+  }, "모델"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(3,1fr)",
+      gap: 8,
+      marginBottom: 16
+    }
+  }, MODEL_TAGS.map(m => /*#__PURE__*/React.createElement("div", {
+    key: m.tag,
+    className: "tap",
+    onClick: () => setTag(m.tag),
+    style: {
+      textAlign: "center",
+      padding: "10px 4px",
+      borderRadius: 12,
+      background: tag === m.tag ? "var(--primary)" : "#f7f8fa",
+      color: tag === m.tag ? "#fff" : "var(--ink)"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 14,
+      fontWeight: 800
+    }
+  }, m.tag), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 9.5,
+      marginTop: 2,
+      opacity: .8
+    }
+  }, m.full)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: "var(--muted)",
+      marginBottom: 8
+    }
+  }, "기기번호 (예: 13 → ", tag || "23U", "13)"), /*#__PURE__*/React.createElement("input", {
+    value: number,
+    onChange: e => setNumber(e.target.value.replace(/[^0-9]/g, "")),
+    placeholder: "기기번호 (선택)",
+    inputMode: "numeric",
+    style: {
+      width: "100%",
+      height: 46,
+      borderRadius: 12,
+      border: "1.5px solid #e6e9f0",
+      padding: "0 14px",
+      fontSize: 15,
+      fontWeight: 700,
+      outline: "none",
+      marginBottom: 16
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "var(--muted)",
+      marginBottom: 14
+    }
+  }, "배정될 값: ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: "var(--primary)"
+    }
+  }, tag, number, hadBattery ? "+보조배터리" : "")), /*#__PURE__*/React.createElement("button", {
+    onClick: save,
+    disabled: !tag,
+    style: {
+      width: "100%",
+      height: 48,
+      borderRadius: 14,
+      background: tag ? "var(--primary)" : "#e3e7ef",
+      color: "#fff",
+      fontWeight: 800,
+      fontSize: 15
+    }
+  }, "배정하기")));
+}
+
+/* =====================================================================
+   캘린더
+===================================================================== */
+/* =====================================================================
+   매출 · 정산
+===================================================================== */
+// 주간(월~일) / 월간 범위 계산 (오프셋 0=이번 주/달, -1=지난 주/달 ...)
+function getWeekRange(offset) {
+  const now = new Date();
+  const day = now.getDay();
+  const diffToMon = day === 0 ? -6 : 1 - day;
+  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + diffToMon + offset * 7);
+  const sunday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6);
+  return [monday, sunday];
+}
+function getMonthRange(offset) {
+  const now = new Date();
+  const first = new Date(now.getFullYear(), now.getMonth() + offset, 1);
+  const last = new Date(now.getFullYear(), now.getMonth() + offset + 1, 0);
+  return [first, last];
+}
+function SalesTab({
+  ctx
+}) {
+  const {
+    reservations
+  } = ctx;
+  const today = new Date();
+  const paidReservations = useMemo(() => reservations.filter(r => normalizeStatus(r.status) !== "취소"), [reservations]);
+  const monthRevenue = useMemo(() => {
+    return paidReservations.filter(r => {
+      const d = parseDotDate(r.startDate);
+      return d && d.getFullYear() === today.getFullYear() && d.getMonth() === today.getMonth();
+    }).reduce((sum, r) => sum + (Number(r.totalPrice) || 0), 0);
+  }, [paidReservations]);
+  const weekDays = useMemo(() => Array.from({
+    length: 7
+  }, (_, i) => {
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6 + i);
+    return d;
+  }), [today]);
+  const weekRevenueByDay = useMemo(() => {
+    return weekDays.map(day => {
+      return paidReservations.filter(r => sameDay(parseDotDate(r.startDate), day)).reduce((sum, r) => sum + (Number(r.totalPrice) || 0), 0);
+    });
+  }, [paidReservations, weekDays]);
+  const weekTotal = weekRevenueByDay.reduce((a, b) => a + b, 0);
+  const maxDay = Math.max(1, ...weekRevenueByDay);
+  const recent = useMemo(() => sortByRecency(paidReservations).slice(0, 8), [paidReservations]);
+
+  // ---- 통계 리포트 (대여시작일 기준, 주간/월간) ----
+  const [periodType, setPeriodType] = useState("month");
+  const [offset, setOffset] = useState(0);
+  const [start, end] = periodType === "week" ? getWeekRange(offset) : getMonthRange(offset);
+  const periodReservations = useMemo(() => {
+    return paidReservations.filter(r => {
+      const d = parseDotDate(r.startDate);
+      return d && d >= start && d <= end;
+    });
+  }, [paidReservations, start.getTime(), end.getTime()]);
+  const periodPaymentTotals = useMemo(() => {
+    const t = {
+      이체: 0,
+      카드: 0
+    };
+    periodReservations.forEach(r => {
+      const isTransfer = (r.paymentMethod || "").includes("계좌") || (r.paymentMethod || "").includes("이체");
+      t[isTransfer ? "이체" : "카드"] += Number(r.totalPrice) || 0;
+    });
+    return t;
+  }, [periodReservations]);
+  const periodTotalCount = periodReservations.length;
+  const periodTotalRevenue = periodPaymentTotals["이체"] + periodPaymentTotals["카드"];
+  const avgPrice = periodTotalCount > 0 ? Math.round(periodTotalRevenue / periodTotalCount) : 0;
+  const modelRanking = useMemo(() => {
+    const counts = {};
+    periodReservations.forEach(r => {
+      const tag = parseModelTag(r.model).tag || r.model || "미배정";
+      counts[tag] = (counts[tag] || 0) + 1;
+    });
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  }, [periodReservations]);
+  const maxModelCount = Math.max(1, ...modelRanking.map(m => m[1]));
+  const periodLabel = periodType === "week" ? `${start.getMonth() + 1}/${start.getDate()} ~ ${end.getMonth() + 1}/${end.getDate()}` : `${start.getFullYear()}년 ${start.getMonth() + 1}월`;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      padding: "4px 16px 16px",
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 21,
+      fontWeight: 800,
+      letterSpacing: "-.02em"
+    }
+  }, "매출 · 정산"), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: 18
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: "var(--muted)",
+      fontWeight: 600
+    }
+  }, "이번 달 매출 (대여시작일 기준, 취소 제외)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 26,
+      fontWeight: 800,
+      marginTop: 6,
+      color: "var(--ink)"
+    }
+  }, fmtMoney(monthRevenue))), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: "16px 16px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 800
+    }
+  }, "최근 7일 매출"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 800,
+      color: "var(--primary)"
+    }
+  }, fmtMoney(weekTotal))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "flex-end",
+      justifyContent: "space-between",
+      height: 90,
+      gap: 8
+    }
+  }, weekDays.map((d, i) => {
+    const isToday = sameDay(d, today);
+    const h = Math.max(4, Math.round(weekRevenueByDay[i] / maxDay * 78));
+    return /*#__PURE__*/React.createElement("div", {
+      key: i,
+      style: {
+        flex: 1,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: "100%",
+        height: h,
+        borderRadius: 6,
+        background: isToday ? "var(--primary)" : "var(--primary-soft)"
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 10,
+        fontWeight: isToday ? 800 : 600,
+        color: isToday ? "var(--primary)" : "#9aa1ad"
+      }
+    }, WEEKDAYS[d.getDay()]));
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginTop: 4
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800
+    }
+  }, "📊 통계 리포트"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 4,
+      background: "#eef1f6",
+      borderRadius: 10,
+      padding: 3
+    }
+  }, [{
+    k: "week",
+    label: "주간"
+  }, {
+    k: "month",
+    label: "월간"
+  }].map(t => /*#__PURE__*/React.createElement("div", {
+    key: t.k,
+    className: "tap",
+    onClick: () => {
+      setPeriodType(t.k);
+      setOffset(0);
+    },
+    style: {
+      padding: "5px 12px",
+      borderRadius: 8,
+      fontSize: 12,
+      fontWeight: 700,
+      color: periodType === t.k ? "#fff" : "var(--muted)",
+      background: periodType === t.k ? "var(--primary)" : "transparent"
+    }
+  }, t.label)))), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: () => setOffset(o => o - 1),
+    style: {
+      padding: 6
+    }
+  }, /*#__PURE__*/React.createElement(Icon.chevLeft, {
+    width: 18,
+    height: 18
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 14,
+      fontWeight: 800
+    }
+  }, periodLabel), /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: () => offset < 0 && setOffset(o => o + 1),
+    style: {
+      padding: 6,
+      opacity: offset < 0 ? 1 : .3
+    }
+  }, /*#__PURE__*/React.createElement(Icon.chevRight, {
+    width: 18,
+    height: 18
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      fontWeight: 700,
+      color: "var(--muted)",
+      marginBottom: 8
+    }
+  }, "결제수단별 결제금액"), /*#__PURE__*/React.createElement("div", {
+    className: "row-btn"
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      fontWeight: 600,
+      flex: 1
+    }
+  }, "이체 결제"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 14,
+      fontWeight: 800
+    }
+  }, fmtMoney(periodPaymentTotals["이체"]))), /*#__PURE__*/React.createElement("div", {
+    className: "divider"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "row-btn"
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      fontWeight: 600,
+      flex: 1
+    }
+  }, "카드 결제"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 14,
+      fontWeight: 800
+    }
+  }, fmtMoney(periodPaymentTotals["카드"]))), /*#__PURE__*/React.createElement("div", {
+    className: "divider"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "row-btn"
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      fontWeight: 700,
+      flex: 1,
+      color: "var(--primary)"
+    }
+  }, "합계"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800,
+      color: "var(--primary)"
+    }
+  }, fmtMoney(periodTotalRevenue))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 10,
+      marginTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "#f7f8fa",
+      borderRadius: 14,
+      padding: "14px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: "var(--muted)",
+      fontWeight: 700
+    }
+  }, "총 예약"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 20,
+      fontWeight: 800,
+      marginTop: 4
+    }
+  }, periodTotalCount, "건")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "#f7f8fa",
+      borderRadius: 14,
+      padding: "14px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: "var(--muted)",
+      fontWeight: 700
+    }
+  }, "객단가 (평균)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 20,
+      fontWeight: 800,
+      marginTop: 4
+    }
+  }, fmtMoney(avgPrice))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 800,
+      marginTop: 2
+    }
+  }, "🏆 인기모델 순위 (", periodLabel, ")"), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: "14px 16px"
+    }
+  }, modelRanking.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "16px 0",
+      textAlign: "center",
+      color: "var(--muted)",
+      fontSize: 13
+    }
+  }, "해당 기간에 예약이 없어요.") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, modelRanking.map(([tag, count], i) => /*#__PURE__*/React.createElement("div", {
+    key: tag
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      marginBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      fontWeight: 800,
+      color: i === 0 ? "#f79009" : "var(--muted)",
+      width: 18
+    }
+  }, i + 1), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13.5,
+      fontWeight: 700,
+      flex: 1
+    }
+  }, tag), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      fontWeight: 800,
+      color: "var(--primary)"
+    }
+  }, count, "건")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 6,
+      borderRadius: 4,
+      background: "#eef1f6",
+      overflow: "hidden"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: "100%",
+      width: `${count / maxModelCount * 100}%`,
+      background: i === 0 ? "#f79009" : "var(--primary)",
+      borderRadius: 4
+    }
+  })))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 800,
+      marginTop: 2
+    }
+  }, "최근 결제 내역"), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: "6px 4px"
+    }
+  }, recent.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "22px 0",
+      textAlign: "center",
+      color: "var(--muted)",
+      fontSize: 13
+    }
+  }, "결제 내역이 없어요.") : recent.map((r, i) => /*#__PURE__*/React.createElement(React.Fragment, {
+    key: r.id
+  }, i > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "divider"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "tap row-btn",
+    onClick: () => ctx.setDetailRes(r)
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13.5,
+      fontWeight: 700
+    }
+  }, r.name || "이름없음"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: "var(--muted)",
+      marginTop: 2
+    }
+  }, fmtOrderShort(r.orderTime))), /*#__PURE__*/React.createElement(PaymentBadge, {
+    method: r.paymentMethod
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13.5,
+      fontWeight: 800,
+      color: "var(--primary)",
+      marginLeft: 8
+    }
+  }, fmtMoney(r.totalPrice)))))));
+}
+
+/* =====================================================================
+   리뷰 관리
+===================================================================== */
+function ReviewTab({
+  ctx
+}) {
+  const {
+    reviews,
+    deleteReview
+  } = ctx;
+  const [target, setTarget] = useState(null);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      padding: "4px 16px 16px",
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 21,
+      fontWeight: 800,
+      letterSpacing: "-.02em"
+    }
+  }, "리뷰 관리"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "var(--muted)",
+      fontWeight: 600
+    }
+  }, "전체 ", reviews.length, "건")), reviews.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      padding: "40px 0",
+      color: "var(--muted)",
+      fontSize: 13
+    }
+  }, "등록된 리뷰가 없어요."), reviews.map(rv => /*#__PURE__*/React.createElement("div", {
+    key: rv.id,
+    className: "card",
+    style: {
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 14,
+      fontWeight: 800
+    }
+  }, rv.name || rv.rawName || "익명"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      color: "#facc15"
+    }
+  }, Array.from({
+    length: 5
+  }).map((_, i) => /*#__PURE__*/React.createElement(Icon.star, {
+    key: i,
+    width: 13,
+    height: 13,
+    fill: i < (rv.rating || 0) ? "#facc15" : "none",
+    stroke: i < (rv.rating || 0) ? "#facc15" : "#e3e7ef"
+  }))), /*#__PURE__*/React.createElement("span", {
+    style: {
+      marginLeft: "auto",
+      fontSize: 11,
+      color: "var(--muted)"
+    }
+  }, rv.date)), (rv.venue || rv.seat) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "var(--muted)",
+      marginTop: 4
+    }
+  }, "📍 ", rv.venue, " ", rv.seat), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: "var(--sub2)",
+      marginTop: 8,
+      lineHeight: 1.5
+    }
+  }, rv.text), rv.image && /*#__PURE__*/React.createElement("img", {
+    src: rv.image,
+    style: {
+      width: "100%",
+      maxHeight: 180,
+      objectFit: "cover",
+      borderRadius: 12,
+      marginTop: 10
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: "var(--muted)"
+    }
+  }, "모델: ", rv.model || "-"), /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: () => setTarget(rv),
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 4,
+      color: "var(--red)",
+      fontSize: 12,
+      fontWeight: 700
+    }
+  }, /*#__PURE__*/React.createElement(Icon.trash, {
+    width: 14,
+    height: 14
+  }), " 삭제")))), target && /*#__PURE__*/React.createElement(ConfirmDialog, {
+    title: "리뷰를 삭제할까요?",
+    desc: `${target.name || "익명"}님의 리뷰가 영구히 삭제돼요.`,
+    confirmLabel: "삭제",
+    danger: true,
+    onCancel: () => setTarget(null),
+    onConfirm: () => {
+      deleteReview(target.id);
+      setTarget(null);
+    }
+  }));
+}
+
+/* =====================================================================
+   설정 (일정 관리) — admin_settings 테이블 사용
+   ※ 아래 키 이름들은 고객 홈페이지 코드가 그대로 읽어가는 이름이라 바꾸면 안 돼요.
+===================================================================== */
+const DEFAULT_MODELS = ["갤럭시 S23울트라", "갤럭시 S24울트라", "갤럭시 S25울트라", "갤럭시 S26울트라", "아이폰 17프로", "아이폰 17프로맥스"];
+const VENUE_REGIONS = {
+  Seoul: ["고척 스카이돔", "티켓링크 아레나", "블루스퀘어", "잠실 실내체육관", "KSPO DOME", "고려대 화정체육관", "장충체육관", "예스24 라이브", "코엑스"],
+  Incheon: ["인스파이어 아레나", "아시아드 주경기장", "문학경기장", "송도컨벤시아"],
+  Gyeonggi: ["고양 종합운동장", "킨텍스"]
+};
+const REGION_LABEL = {
+  Seoul: "서울",
+  Incheon: "인천",
+  Gyeonggi: "경기"
+};
+const DELIVERY_METHODS = [{
+  key: "post",
+  label: "택배 수령"
+}, {
+  key: "quick",
+  label: "퀵 수령"
+}, {
+  key: "venue",
+  label: "공연장 수령"
+}, {
+  key: "office",
+  label: "사무실 수령"
+}];
+const SETTING_CATEGORIES = [{
+  key: "model",
+  label: "대여모델 마감",
+  icon: "📱",
+  accent: "#f04438",
+  accentSoft: "#fde4e2"
+}, {
+  key: "delivery",
+  label: "수령 방법 마감",
+  icon: "📦",
+  accent: "#f79009",
+  accentSoft: "#fdf0dc"
+}, {
+  key: "onsite",
+  label: "당일·공연장 반납 가능",
+  icon: "↩️",
+  accent: "#12b76a",
+  accentSoft: "#e3f7ee"
+}, {
+  key: "venue",
+  label: "공연장 수령 가능한 위치",
+  icon: "🏟️",
+  accent: "#1f6bff",
+  accentSoft: "#e7efff"
+}];
+
+// input type="date" 값("2026-07-04")을 홈페이지가 쓰는 dateKey("2026-7-4")로 변환
+function toDateKey(isoStr) {
+  if (!isoStr) return "";
+  const [y, m, d] = isoStr.split("-").map(Number);
+  return `${y}-${m}-${d}`;
+}
+// Date 객체 -> dateKey
+function dateKeyFromDate(d) {
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+}
+function SettingsTab({
+  ctx
+}) {
+  const {
+    settings,
+    saveSetting,
+    reservations,
+    reviews
+  } = ctx;
+  const modelDisabled = settings.model_disabled || {};
+  const blockedSchedule = settings.blocked_schedule || {};
+  const blockedDelivery = settings.blocked_delivery_dates || {};
+  const availableOnsite = settings.available_onsite_dates || [];
+  const venueAvailableDates = settings.venue_available_dates || {}; // { dateKey: { venues:[...], hours:"14:00~20:00" } } - 화이트리스트, 기본 전부 불가
+  const venueCustom = settings.venue_custom || [];
+  const [cursor, setCursor] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d;
+  });
+  const [pickedDate, setPickedDate] = useState(null);
+  const [category, setCategory] = useState(null);
+  const [newVenue, setNewVenue] = useState({
+    region: "Seoul",
+    name: "",
+    place: ""
+  });
+  const [diagResult, setDiagResult] = useState("");
+  const toggleModel = m => saveSetting("model_disabled", {
+    ...modelDisabled,
+    [m]: !modelDisabled[m]
+  });
+  const addCustomVenue = () => {
+    if (!newVenue.name.trim()) return;
+    saveSetting("venue_custom", [...venueCustom, {
+      ...newVenue,
+      name: newVenue.name.trim()
+    }]);
+    setNewVenue({
+      region: "Seoul",
+      name: "",
+      place: ""
+    });
+  };
+  const removeCustomVenue = idx => saveSetting("venue_custom", venueCustom.filter((_, i) => i !== idx));
+  const ALL_VENUE_NAMES = [...Object.values(VENUE_REGIONS).flat(), ...venueCustom.map(v => v.name)];
+
+  // 해당 날짜에 설정된 항목이 있는지 (캘린더 점 표시용)
+  const hasSetting = dateKey => {
+    const modelHit = DEFAULT_MODELS.some(m => (blockedSchedule[m] || []).includes(dateKey));
+    const deliveryHit = DELIVERY_METHODS.some(m => (blockedDelivery[m.key] || []).includes(dateKey));
+    const onsiteHit = availableOnsite.includes(dateKey);
+    const venueHit = ((venueAvailableDates[dateKey] || {}).venues || []).length > 0;
+    return {
+      modelHit,
+      deliveryHit,
+      onsiteHit,
+      venueHit
+    };
+  };
+  const year = cursor.getFullYear(),
+    month = cursor.getMonth();
+  const firstDow = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < firstDow; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(new Date(year, month, d));
+  const today = new Date();
+  const changeMonth = delta => setCursor(new Date(year, month + delta, 1));
+  const closeSheet = () => {
+    setPickedDate(null);
+    setCategory(null);
+  };
+  const pickedKey = pickedDate ? dateKeyFromDate(pickedDate) : null;
+  const runDiagnostic = async () => {
+    setDiagResult("테스트 중...");
+    const lines = [];
+    lines.push(`URL: ${SUPABASE_URL || "(비어있음)"}`);
+    lines.push(`KEY 앞 20자: ${SUPABASE_ANON_KEY ? SUPABASE_ANON_KEY.slice(0, 20) + "..." : "(비어있음)"}`);
+    try {
+      const payload = JSON.parse(atob(SUPABASE_ANON_KEY.split(".")[1]));
+      lines.push(`KEY의 role: ${payload.role} / ref: ${payload.ref}`);
+    } catch (e) {
+      lines.push("KEY 디코딩 실패 (형식이 이상해요)");
+    }
+    try {
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/admin_settings`, {
+        method: "POST",
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          "Content-Type": "application/json",
+          Prefer: "resolution=merge-duplicates,return=representation"
+        },
+        body: JSON.stringify({
+          key: "diag_test",
+          value: {
+            ok: true,
+            at: new Date().toISOString()
+          }
+        })
+      });
+      const text = await res.text();
+      lines.push(`응답 상태: ${res.status}`);
+      lines.push(`응답 내용: ${text}`);
+    } catch (e) {
+      lines.push(`요청 자체 실패(네트워크/CORS): ${e.message}`);
+    }
+    setDiagResult(lines.join("\n"));
+  };
+  const downloadBackup = () => {
+    try {
+      const backup = {
+        exportedAt: new Date().toISOString(),
+        reservations,
+        reviews,
+        settings
+      };
+      const blob = new Blob([JSON.stringify(backup, null, 2)], {
+        type: "application/json"
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const stamp = new Date().toISOString().slice(0, 10);
+      a.href = url;
+      a.download = `serincam_backup_${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      ctx.showToast("백업 파일을 다운로드했어요");
+    } catch (e) {
+      ctx.showToast("백업 실패: " + (e.message || ""));
+    }
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      padding: "4px 16px 16px",
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 21,
+      fontWeight: 800,
+      letterSpacing: "-.02em"
+    }
+  }, "설정 · 일정 관리"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "#eaf1ff",
+      border: "1px solid #d4e3ff",
+      borderRadius: 16,
+      padding: 12,
+      fontSize: 11.5,
+      color: "#1f6bff",
+      lineHeight: 1.55,
+      fontWeight: 600
+    }
+  }, "📅 날짜를 탭하면 그 날짜에 적용할 항목(모델 마감/수령 마감/반납 가능/공연장 위치)을 고를 수 있어요."), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: () => changeMonth(-1),
+    style: {
+      padding: 6
+    }
+  }, /*#__PURE__*/React.createElement(Icon.chevLeft, {
+    width: 18,
+    height: 18
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800
+    }
+  }, year, "년 ", month + 1, "월"), /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: () => changeMonth(1),
+    style: {
+      padding: 6
+    }
+  }, /*#__PURE__*/React.createElement(Icon.chevRight, {
+    width: 18,
+    height: 18
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(7,1fr)",
+      textAlign: "center",
+      marginBottom: 4
+    }
+  }, WEEKDAYS.map(w => /*#__PURE__*/React.createElement("div", {
+    key: w,
+    style: {
+      fontSize: 11,
+      color: "var(--muted)",
+      fontWeight: 700,
+      padding: "4px 0"
+    }
+  }, w))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(7,1fr)",
+      gap: 3
+    }
+  }, cells.map((d, i) => {
+    if (!d) return /*#__PURE__*/React.createElement("div", {
+      key: i
+    });
+    const key = dateKeyFromDate(d);
+    const isToday = sameDay(d, today);
+    const flags = hasSetting(key);
+    const anyFlag = flags.modelHit || flags.deliveryHit || flags.onsiteHit || flags.venueHit;
+    return /*#__PURE__*/React.createElement("div", {
+      key: i,
+      className: "tap",
+      onClick: () => {
+        setPickedDate(d);
+        setCategory(null);
+      },
+      style: {
+        aspectRatio: "1",
+        borderRadius: 12,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 2,
+        background: isToday ? "var(--primary)" : "transparent"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 13,
+        fontWeight: isToday ? 800 : 600,
+        color: isToday ? "#fff" : "var(--ink)"
+      }
+    }, d.getDate()), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 2,
+        height: 4
+      }
+    }, flags.modelHit && /*#__PURE__*/React.createElement("span", {
+      style: {
+        width: 4,
+        height: 4,
+        borderRadius: "50%",
+        background: isToday ? "#fff" : "#f04438"
+      }
+    }), flags.deliveryHit && /*#__PURE__*/React.createElement("span", {
+      style: {
+        width: 4,
+        height: 4,
+        borderRadius: "50%",
+        background: isToday ? "#fff" : "#f79009"
+      }
+    }), flags.onsiteHit && /*#__PURE__*/React.createElement("span", {
+      style: {
+        width: 4,
+        height: 4,
+        borderRadius: "50%",
+        background: isToday ? "#fff" : "#12b76a"
+      }
+    }), flags.venueHit && /*#__PURE__*/React.createElement("span", {
+      style: {
+        width: 4,
+        height: 4,
+        borderRadius: "50%",
+        background: isToday ? "#fff" : "#1f6bff"
+      }
+    }), !anyFlag && /*#__PURE__*/React.createElement("span", {
+      style: {
+        width: 4,
+        height: 4
+      }
+    })));
+  }))), /*#__PURE__*/React.createElement(SectionTitle, {
+    text: "대여 모델 · 전체 품절"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: "4px 4px"
+    }
+  }, DEFAULT_MODELS.map((m, i) => /*#__PURE__*/React.createElement(React.Fragment, {
+    key: m
+  }, i > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "divider"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "row-btn"
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13.5,
+      fontWeight: 600,
+      flex: 1
+    }
+  }, m), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      fontWeight: 700,
+      color: modelDisabled[m] ? "var(--red)" : "var(--green)",
+      marginRight: 8
+    }
+  }, modelDisabled[m] ? "품절" : "판매중"), /*#__PURE__*/React.createElement(Toggle, {
+    on: !modelDisabled[m],
+    onClick: () => toggleModel(m)
+  })))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "8px 14px 12px",
+      fontSize: 11.5,
+      color: "var(--muted)",
+      lineHeight: 1.5
+    }
+  }, "날짜와 상관없이 이 모델 전체를 막아요. 특정 날짜만 막으려면 위 캘린더에서 날짜를 선택하세요.")), /*#__PURE__*/React.createElement(SectionTitle, {
+    text: "공연장 위치 추가"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: "var(--muted)",
+      marginBottom: 10,
+      lineHeight: 1.5
+    }
+  }, "여기서는 공연장 \"목록\"만 추가해요. 특정 날짜에 어떤 공연장이 실제로 가능한지는 위 캘린더에서 날짜 선택 후 \"공연장 수령 가능한 위치\"에서 골라주세요."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("select", {
+    value: newVenue.region,
+    onChange: e => setNewVenue(v => ({
+      ...v,
+      region: e.target.value
+    })),
+    style: {
+      height: 42,
+      borderRadius: 12,
+      border: "1.5px solid #e6e9f0",
+      padding: "0 10px",
+      fontSize: 13
+    }
+  }, Object.keys(VENUE_REGIONS).map(r => /*#__PURE__*/React.createElement("option", {
+    key: r,
+    value: r
+  }, REGION_LABEL[r]))), /*#__PURE__*/React.createElement("input", {
+    placeholder: "공연장 이름",
+    value: newVenue.name,
+    onChange: e => setNewVenue(v => ({
+      ...v,
+      name: e.target.value
+    })),
+    style: {
+      height: 42,
+      borderRadius: 12,
+      border: "1.5px solid #e6e9f0",
+      padding: "0 12px",
+      fontSize: 13,
+      outline: "none"
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    placeholder: "픽업 장소 (예: 정문 앞 주차장)",
+    value: newVenue.place,
+    onChange: e => setNewVenue(v => ({
+      ...v,
+      place: e.target.value
+    })),
+    style: {
+      height: 42,
+      borderRadius: 12,
+      border: "1.5px solid #e6e9f0",
+      padding: "0 12px",
+      fontSize: 13,
+      outline: "none"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: addCustomVenue,
+    style: {
+      height: 44,
+      borderRadius: 12,
+      background: "var(--primary)",
+      color: "#fff",
+      fontWeight: 700,
+      fontSize: 13
+    }
+  }, "추가하기")), venueCustom.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      marginTop: 14
+    }
+  }, venueCustom.map((v, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      background: "#f7f8fa",
+      borderRadius: 12,
+      padding: "10px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 700
+    }
+  }, v.name, " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: "var(--muted)",
+      fontWeight: 600
+    }
+  }, "(", REGION_LABEL[v.region] || v.region, ")")), v.place && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: "var(--muted)",
+      marginTop: 2
+    }
+  }, v.place)), /*#__PURE__*/React.createElement("span", {
+    className: "tap",
+    onClick: () => removeCustomVenue(i)
+  }, /*#__PURE__*/React.createElement(Icon.trash, {
+    width: 16,
+    height: 16,
+    color: "var(--red)"
+  })))))), /*#__PURE__*/React.createElement(SectionTitle, {
+    text: "데이터 백업"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: "var(--muted)",
+      marginBottom: 12,
+      lineHeight: 1.5
+    }
+  }, "예약·리뷰·설정 데이터를 지금 상태 그대로 파일 하나로 저장해요. 문제가 생겼을 때 참고용으로 보관해두면 좋아요."), /*#__PURE__*/React.createElement("button", {
+    onClick: downloadBackup,
+    style: {
+      width: "100%",
+      height: 46,
+      borderRadius: 12,
+      background: "var(--primary)",
+      color: "#fff",
+      fontWeight: 800,
+      fontSize: 14,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Icon.download, {
+    width: 17,
+    height: 17
+  }), " 지금 백업 다운로드")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 10
+    }
+  }), /*#__PURE__*/React.createElement(SectionTitle, {
+    text: "🔧 연결 진단"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: "var(--muted)",
+      marginBottom: 12,
+      lineHeight: 1.5
+    }
+  }, "저장이 계속 실패할 때, 이 버튼으로 Supabase에 직접 테스트 요청을 보내서 정확한 원인을 화면에 보여줘요."), /*#__PURE__*/React.createElement("button", {
+    onClick: runDiagnostic,
+    style: {
+      width: "100%",
+      height: 46,
+      borderRadius: 12,
+      background: "#7a5cff",
+      color: "#fff",
+      fontWeight: 800,
+      fontSize: 14
+    }
+  }, "진단 테스트 실행"), diagResult && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 12,
+      padding: 12,
+      borderRadius: 12,
+      background: "#f7f8fa",
+      fontSize: 12,
+      lineHeight: 1.6,
+      whiteSpace: "pre-wrap",
+      wordBreak: "break-all",
+      color: "var(--ink)"
+    }
+  }, diagResult)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 10
+    }
+  }), pickedDate && !category && /*#__PURE__*/React.createElement(DateCategoryMenu, {
+    date: pickedDate,
+    onPick: setCategory,
+    onClose: closeSheet
+  }), pickedDate && category === "model" && /*#__PURE__*/React.createElement(DateToggleSheet, {
+    title: `${pickedDate.getMonth() + 1}/${pickedDate.getDate()}(${WEEKDAYS[pickedDate.getDay()]}) · 대여모델 마감`,
+    onBack: () => setCategory(null),
+    onClose: closeSheet,
+    items: DEFAULT_MODELS.map(m => ({
+      key: m,
+      label: m,
+      on: (blockedSchedule[m] || []).includes(pickedKey),
+      onToggle: () => {
+        const list = blockedSchedule[m] || [];
+        const next = list.includes(pickedKey) ? list.filter(d => d !== pickedKey) : [...list, pickedKey];
+        saveSetting("blocked_schedule", {
+          ...blockedSchedule,
+          [m]: next
+        });
+      }
+    })),
+    onLabel: "마감",
+    offLabel: "가능"
+  }), pickedDate && category === "delivery" && /*#__PURE__*/React.createElement(DateToggleSheet, {
+    title: `${pickedDate.getMonth() + 1}/${pickedDate.getDate()}(${WEEKDAYS[pickedDate.getDay()]}) · 수령 방법 마감`,
+    onBack: () => setCategory(null),
+    onClose: closeSheet,
+    items: DELIVERY_METHODS.map(m => ({
+      key: m.key,
+      label: m.label,
+      on: (blockedDelivery[m.key] || []).includes(pickedKey),
+      onToggle: () => {
+        const list = blockedDelivery[m.key] || [];
+        const next = list.includes(pickedKey) ? list.filter(d => d !== pickedKey) : [...list, pickedKey];
+        saveSetting("blocked_delivery_dates", {
+          ...blockedDelivery,
+          [m.key]: next
+        });
+      }
+    })),
+    onLabel: "마감",
+    offLabel: "가능"
+  }), pickedDate && category === "onsite" && /*#__PURE__*/React.createElement(DateToggleSheet, {
+    title: `${pickedDate.getMonth() + 1}/${pickedDate.getDate()}(${WEEKDAYS[pickedDate.getDay()]}) · 당일·공연장 반납 가능`,
+    onBack: () => setCategory(null),
+    onClose: closeSheet,
+    note: "기본은 반납 불가예요. 켜면 이 날짜에 당일반납·공연장반납을 받을 수 있어요.",
+    items: [{
+      key: "onsite",
+      label: "이 날짜에 반납 받기",
+      on: availableOnsite.includes(pickedKey),
+      onToggle: () => {
+        const next = availableOnsite.includes(pickedKey) ? availableOnsite.filter(d => d !== pickedKey) : [...availableOnsite, pickedKey];
+        saveSetting("available_onsite_dates", next);
+      }
+    }],
+    onLabel: "가능",
+    offLabel: "불가",
+    positive: true
+  }), pickedDate && category === "venue" && /*#__PURE__*/React.createElement(DateToggleSheet, {
+    title: `${pickedDate.getMonth() + 1}/${pickedDate.getDate()}(${WEEKDAYS[pickedDate.getDay()]}) · 공연장 수령 가능한 위치`,
+    onBack: () => setCategory(null),
+    onClose: closeSheet,
+    note: "기본은 전부 불가예요. 이 날짜에 실제로 사용할 공연장만 켜주세요.",
+    extraContent: /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginBottom: 14
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        fontWeight: 700,
+        color: "var(--muted)",
+        marginBottom: 6
+      }
+    }, "운영시간 (홈페이지에 굵게 표시돼요)"), /*#__PURE__*/React.createElement("input", {
+      value: (venueAvailableDates[pickedKey] || {}).hours || "",
+      onChange: e => saveSetting("venue_available_dates", {
+        ...venueAvailableDates,
+        [pickedKey]: {
+          ...(venueAvailableDates[pickedKey] || {}),
+          hours: e.target.value
+        }
+      }),
+      placeholder: "예: 14:00~20:00",
+      style: {
+        width: "100%",
+        height: 42,
+        borderRadius: 12,
+        border: "1.5px solid #e6e9f0",
+        padding: "0 12px",
+        fontSize: 13.5,
+        fontWeight: 700,
+        outline: "none"
+      }
+    })),
+    items: ALL_VENUE_NAMES.map(name => ({
+      key: name,
+      label: name,
+      on: ((venueAvailableDates[pickedKey] || {}).venues || []).includes(name),
+      onToggle: () => {
+        const cur = venueAvailableDates[pickedKey] || {};
+        const list = cur.venues || [];
+        const next = list.includes(name) ? list.filter(v => v !== name) : [...list, name];
+        saveSetting("venue_available_dates", {
+          ...venueAvailableDates,
+          [pickedKey]: {
+            ...cur,
+            venues: next
+          }
+        });
+      }
+    })),
+    onLabel: "가능",
+    offLabel: "불가",
+    positive: true
+  }));
+}
+function SectionTitle({
+  text
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: "#9aa1ad",
+      padding: "2px 4px"
+    }
+  }, text);
+}
+function DateCategoryMenu({
+  date,
+  onPick,
+  onClose
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fadein",
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(10,12,18,.4)",
+      zIndex: 260,
+      display: "flex",
+      alignItems: "flex-end",
+      maxWidth: 480,
+      margin: "0 auto"
+    },
+    onClick: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card sheet",
+    onClick: e => e.stopPropagation(),
+    style: {
+      width: "100%",
+      borderRadius: "24px 24px 0 0",
+      padding: "18px 16px 26px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 36,
+      height: 4,
+      background: "#e3e7ef",
+      borderRadius: 4,
+      margin: "0 auto 14px"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      marginBottom: 4
+    }
+  }, date.getMonth() + 1, "월 ", date.getDate(), "일 (", WEEKDAYS[date.getDay()], ")"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "var(--muted)",
+      marginBottom: 14
+    }
+  }, "어떤 설정을 조정할까요?"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, SETTING_CATEGORIES.map(c => /*#__PURE__*/React.createElement("div", {
+    key: c.key,
+    className: "tap",
+    onClick: () => onPick(c.key),
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      padding: "13px 14px",
+      borderRadius: 14,
+      background: c.accentSoft
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 18
+    }
+  }, c.icon), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 14,
+      fontWeight: 700,
+      color: c.accent,
+      flex: 1
+    }
+  }, c.label), /*#__PURE__*/React.createElement(Icon.chevRight, {
+    width: 16,
+    height: 16,
+    color: c.accent
+  }))))));
+}
+function DateToggleSheet({
+  title,
+  items,
+  onBack,
+  onClose,
+  note,
+  onLabel = "켜짐",
+  offLabel = "꺼짐",
+  positive,
+  extraContent
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fadein",
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(10,12,18,.4)",
+      zIndex: 260,
+      display: "flex",
+      alignItems: "flex-end",
+      maxWidth: 480,
+      margin: "0 auto"
+    },
+    onClick: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card sheet",
+    onClick: e => e.stopPropagation(),
+    style: {
+      width: "100%",
+      borderRadius: "24px 24px 0 0",
+      padding: "18px 16px 26px",
+      maxHeight: "80vh",
+      overflowY: "auto"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 36,
+      height: 4,
+      background: "#e3e7ef",
+      borderRadius: 4,
+      margin: "0 auto 14px"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      marginBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "tap",
+    onClick: onBack,
+    style: {
+      padding: 4
+    }
+  }, /*#__PURE__*/React.createElement(Icon.chevLeft, {
+    width: 16,
+    height: 16
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800
+    }
+  }, title)), note && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: "var(--muted)",
+      marginBottom: 12,
+      lineHeight: 1.5
+    }
+  }, note), extraContent, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 4
+    }
+  }, items.map((it, i) => /*#__PURE__*/React.createElement(React.Fragment, {
+    key: it.key
+  }, i > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "divider"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "row-btn"
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13.5,
+      fontWeight: 600,
+      flex: 1
+    }
+  }, it.label), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      fontWeight: 700,
+      color: it.on ? positive ? "var(--green)" : "var(--red)" : "var(--muted)",
+      marginRight: 8
+    }
+  }, it.on ? onLabel : offLabel), /*#__PURE__*/React.createElement(Toggle, {
+    on: it.on,
+    onClick: it.onToggle
+  })))))));
+}
+function Toggle({
+  on,
+  onClick
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "tap",
+    onClick: onClick,
+    style: {
+      width: 44,
+      height: 26,
+      borderRadius: 14,
+      background: on ? "var(--primary)" : "#e3e7ef",
+      position: "relative",
+      transition: "background .15s"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 20,
+      height: 20,
+      borderRadius: "50%",
+      background: "#fff",
+      position: "absolute",
+      top: 3,
+      left: on ? 21 : 3,
+      transition: "left .15s",
+      boxShadow: "0 1px 3px rgba(0,0,0,.2)"
+    }
+  }));
+}
+
+/* ---------- 렌더 ---------- */
+try {
+  if (!window.React || !window.ReactDOM) {
+    throw new Error("React 라이브러리를 불러오지 못했어요. 인터넷 연결 또는 방화벽/광고차단 확장 프로그램을 확인해주세요.");
+  }
+  ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));
+} catch (e) {
+  var box = document.getElementById("boot-error");
+  if (box) {
+    box.style.display = "block";
+    box.textContent += "[렌더 오류] " + (e && e.message ? e.message : e) + "\n";
+  }
+  console.error(e);
+}</script>
+</body>
+</html>
