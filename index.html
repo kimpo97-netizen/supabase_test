@@ -5198,8 +5198,6 @@ var PhoneRentalApp = () => {
     }
   };
   var handleRentalStart = (method, concertRange) => {
-    // [NEW] 예약 시작 시마다 카카오톡 채널 친구 추가 안내를 먼저 띄움
-    setShowKakaoFriendModal(true);
     setIsPackage(false); // [NEW] 일반 예약으로 들어오면 콘서트 패키지 모드 해제 (패키지 시작 시에는 직후 다시 켬)
     setPackageConcert(null);
     if (method) setDeliveryMethod(method);else {
@@ -9723,8 +9721,9 @@ React.createElement("div", {
     className: "whitespace-nowrap"
   }, (() => {
     // [NEW] 조회 전 또는 예약 내역이 없으면: "마이페이지" / 예약이 있을 때만: "OOO님"
-    if (!lookupResult || lookupResult.length === 0 || !lookupName) return '마이페이지';
-    var n = String(lookupName).trim();
+    // 카카오 회원은 예약 내역이 없어도 이름 표시
+    if (!kakaoProfile && (!lookupResult || lookupResult.length === 0 || !lookupName)) return '마이페이지';
+    var n = String(kakaoProfile ? kakaoProfile.name : lookupName).trim();
     if (n.length > 4) n = n.slice(0, 4) + '..';
     return n + '님';
   })()))))), (activeNav === 'home' || activeNav === 'rental' || activeNav === 'qna' || activeNav === 'mypage' || activeNav === 'my') && React.createElement("div", {
