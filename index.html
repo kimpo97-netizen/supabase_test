@@ -2895,6 +2895,34 @@ var PhoneRentalApp = () => {
     setOtpVerifying(true);
     setOtpError('');
     try {
+      // [NEW] 카카오 로그인했지만 예약자 정보가 아직 연결 안 된 손님: 이 인증으로 바로 연결 → 다음 예약부터 자동 입력
+      if (kakaoUser && !kakaoProfile && userInfo.name.length >= 2) {
+        var link = await sbAuth.functions.invoke('link-kakao-phone', {
+          body: {
+            name: userInfo.name,
+            phone: digits,
+            code: otpCode
+          }
+        });
+        if (!link.error && link.data && link.data.ok) {
+          var profile = link.data.profile;
+          setKakaoProfile(profile);
+          setLookupName(profile.name);
+          setLookupPhone(formatPhone(profile.phone));
+          handleLookup(profile.name, formatPhone(profile.phone), true);
+          setIsPhoneVerified(true);
+          setOtpError('');
+          showAppToast('연락처 인증이 완료되었어요! ✅\n다음 예약부터는 자동으로 입력돼요');
+          return;
+        }
+        // 인증번호 틀림·횟수 초과는 그대로 안내. 연결 함수 문제(미배포·서버 오류·로그인 만료)면 일반 인증으로 계속 진행
+        var linkStatus = link.error && link.error.context && link.error.context.status;
+        if (linkStatus === 400 || linkStatus === 429) {
+          setOtpError(await getFnErrorMessage(link.error, '인증번호가 일치하지 않습니다.'));
+          return;
+        }
+        console.warn('link-kakao-phone 실패 → 일반 인증으로 진행:', link.error);
+      }
       var {
         data,
         error
@@ -3280,11 +3308,12 @@ var PhoneRentalApp = () => {
   useEffect(() => {
     if (step !== 3 || !kakaoProfile) return;
     var digits = userInfo.phone.replace(/[^0-9]/g, '');
-    if (!userInfo.name && !digits) {
+    // 비어 있는 칸만 채운다 (손님이 직접 고쳐 쓴 값은 덮어쓰지 않음)
+    if (!userInfo.name || !digits) {
       setUserInfo(prev => ({
         ...prev,
-        name: kakaoProfile.name,
-        phone: formatPhone(kakaoProfile.phone)
+        name: prev.name || kakaoProfile.name,
+        phone: prev.phone.replace(/[^0-9]/g, '') ? prev.phone : formatPhone(kakaoProfile.phone)
       }));
     } else if (digits === kakaoProfile.phone && !isPhoneVerified) {
       setIsPhoneVerified(true);
